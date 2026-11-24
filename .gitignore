@@ -6,3 +6,18 @@ client/frontend/dist/
 .vscode/
 .idea/
 
+node_modules/
+
+*.test
+*.prof
+*.pprof
+coverage.out
+
+*.db
+*.sqlite
+*.dbkp
+*.log
+
+**/certs/*.pem
+**/certs/*.crt
+**/certs/*.key
