@@ -1,10 +1,14 @@
 bin/
 *.exe
 server/data/
-client/build/
+client/build/bin/
 client/frontend/dist/
 .vscode/
 .idea/
+
+# Wails 自动生成的文件
+client/frontend/wailsjs/
+client/frontend/package.json.md5
 
 node_modules/
 
@@ -21,3 +25,9 @@ coverage.out
 **/certs/*.pem
 **/certs/*.crt
 **/certs/*.key
+
+# 环境变量与系统杂物
+.env
+.env.local
+.DS_Store
+Thumbs.db
