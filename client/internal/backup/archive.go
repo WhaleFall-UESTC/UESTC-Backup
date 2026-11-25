@@ -237,6 +237,62 @@ func Verify(archive string) error {
 	return err
 }
 
+// Unpack 按记录顺序把归档还原到 dst，里面已经有东西就拒绝（errs.TargetNotEmpty）。
+// 动 dst 之前先经 Verify 核对，有问题一个文件都不写；路径非法或 Kind 不认识报 errs.Corrupted（路径是归档），
+// 写盘失败报 errs.IO（路径是那条记录）。符号链接跳过，中途出错不清理已经写出的文件。
+func Unpack(archive, dst string) error {
+	if err := Verify(archive); err != nil {
+		return err
+	}
+	if err := prepareTarget(dst); err != nil {
+		return err
+	}
+
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	a := &archiveReader{path: archive, f: f}
+	if err := a.readHeader(); err != nil {
+		return err
+	}
+	return a.each(func(rec Record) error {
+		if !filepath.IsLocal(rec.Path) {
+			return errs.Newf(errs.Corrupted, "path %q is not local", rec.Path).At(archive)
+		}
+		target := filepath.Join(dst, filepath.FromSlash(rec.Path))
+		switch rec.Kind {
+		case KindDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return errs.Wrap(err, errs.IO).At(rec.Path)
+			}
+		case KindFile:
+			return a.restoreFile(rec, target)
+		case KindSymlink:
+			// 留到“文件类型支持”，要先给 Entry 加链接目标
+		default:
+			return errs.Newf(errs.Corrupted, "record kind %d", rec.Kind).At(archive)
+		}
+		return nil
+	})
+}
+
+func prepareTarget(dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		return errs.New(errs.TargetNotEmpty).At(dst)
+	}
+	return nil
+}
+
 // archiveReader 顺序读归档里的记录。sum 不为 nil 时同时算整份归档的校验值。
 type archiveReader struct {
 	path string
@@ -353,6 +409,33 @@ func (a *archiveReader) checkData(rec Record) error {
 	}
 	if content.Sum64() != rec.CRC64 {
 		return errs.Newf(errs.Corrupted, "checksum mismatch").At(rec.Path)
+	}
+	return nil
+}
+
+// restoreFile 在 target 处写出一条文件记录，写完恢复修改时间。
+func (a *archiveReader) restoreFile(rec Record, target string) error {
+	out, err := os.Create(target)
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+
+	_, err = io.CopyN(out, a.f, rec.Size)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err == io.EOF {
+		// 归档在 Verify 之后又被截短了
+		return incomplete(err, "data is incomplete").At(rec.Path)
+	}
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	if _, err := io.CopyN(io.Discard, a.f, paddedSize(rec.Size)-rec.Size); err != nil {
+		return incomplete(err, "padding is incomplete").At(rec.Path)
+	}
+	if err := os.Chtimes(target, rec.ModTime, rec.ModTime); err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
 	return nil
 }

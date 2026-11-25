@@ -16,6 +16,7 @@ const (
 	SourceChanged
 	IO
 	InvalidArgument
+	TargetNotEmpty
 )
 
 var phrases = map[Code]string{
@@ -25,6 +26,7 @@ var phrases = map[Code]string{
 	SourceChanged:      "source file changed since it was scanned",
 	IO:                 "i/o error",
 	InvalidArgument:    "invalid argument",
+	TargetNotEmpty:     "target directory is not empty",
 }
 
 // String 返回类别的固定说法。
@@ -37,6 +39,7 @@ var (
 	ErrSourceChanged      = &Error{Code: SourceChanged}
 	ErrIO                 = &Error{Code: IO}
 	ErrInvalidArgument    = &Error{Code: InvalidArgument}
+	ErrTargetNotEmpty     = &Error{Code: TargetNotEmpty}
 )
 
 // Error 是引擎自己判定出来的错误。
