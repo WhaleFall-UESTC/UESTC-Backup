@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"client/internal/errs"
 	"errors"
 	"io"
 	"io/fs"
@@ -8,8 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-
-	"client/internal/errs"
 )
 
 // 读回的记录要和交给 Pack 的扫描结果逐项一致，顺序也不能变。路径里带上中文和空格。
@@ -175,6 +174,7 @@ func TestReadIndexRejectsBadDataOffset(t *testing.T) {
 		})
 	}
 }
+
 func TestVerifyAcceptsIntactArchive(t *testing.T) {
 	root := sampleTree(t)
 	writeFile(t, filepath.Join(root, "big.bin"), string(dataBytes(150_000)))

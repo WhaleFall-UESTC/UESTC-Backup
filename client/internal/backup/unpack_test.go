@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"client/internal/errs"
 	"errors"
 	"io"
 	"io/fs"
@@ -10,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"client/internal/errs"
 )
 
 // 还原出来的目录树要和源目录一致：节点和顺序、文件内容、文件的修改时间。

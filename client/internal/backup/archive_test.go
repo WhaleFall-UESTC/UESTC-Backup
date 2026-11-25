@@ -2,17 +2,15 @@ package backup
 
 import (
 	"bytes"
+	"client/internal/errs"
 	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"client/internal/errs"
 )
 
 // 归档大小必须和按布局算出来的字节数完全相等。
@@ -91,31 +89,13 @@ func TestPackLayoutIsFrozen(t *testing.T) {
 	// d/a 在磁盘上有 300 个 z，记录的 Size 却是 258：多出来的 42 个不能进归档。
 	writeFile(t, filepath.Join(src, "d", "a"), string(bytes.Repeat([]byte{'z'}, 300)))
 
-	header := []byte{
-		'D', 'B', 'K', 'P', // Magic
-		0x01, 0x00, // Version = 1
-		0x00, 0x00, // Algorithm = 0
-		0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 24
-	}
-	zeroCRC := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	// 三个 CRC64 是用另一份 CRC-64/ECMA 实现算出来的，没有借助被测代码
-	emptyArchiveCRC := []byte{0x9B, 0xF7, 0x46, 0x6E, 0x38, 0x25, 0xC7, 0x03}
-	fullArchiveCRC := []byte{0x44, 0x76, 0x78, 0x5E, 0xB1, 0x36, 0x73, 0xCF}
-	contentCRC := []byte{0xC6, 0x2D, 0x41, 0xBA, 0xA9, 0xB5, 0x38, 0x75} // 258 个 z 的 CRC64
-	modTime := time.Unix(1_000_000_000, 123_456_789)
-	modTimeBytes := []byte{
-		0x00, 0xCA, 0x9A, 0x3B, 0x00, 0x00, 0x00, 0x00, // ModTimeSec = 1000000000
-		0x15, 0xCD, 0x5B, 0x07, // ModTimeNsec = 123456789
-	}
-
 	t.Run("空目录树", func(t *testing.T) {
 		archive := packTree(t, src, nil)
 		got, err := os.ReadFile(archive)
 		if err != nil {
 			t.Fatalf("Setup failed: read the archive: %v", err)
 		}
-		want := append(slices.Clone(header), emptyArchiveCRC...)
-		if !bytes.Equal(got, want) {
+		if want := frozenEmptyArchive(); !bytes.Equal(got, want) {
 			t.Errorf("Pack() on an empty tree wrote % x, want only the header % x", got, want)
 		}
 		// 空归档读回来应该是 0 条记录
@@ -127,48 +107,12 @@ func TestPackLayoutIsFrozen(t *testing.T) {
 	t.Run("目录、文件、符号链接各一条", func(t *testing.T) {
 		// d 的 Size 写 4096：磁盘上它没有这么大，Pack 不能重新 stat 把它改掉。
 		entries := []Entry{
-			{Path: "d", Kind: KindDir, Size: 4096, Mode: fs.ModeDir | 0o755, ModTime: modTime},
-			{Path: "d/a", Kind: KindFile, Size: 258, Mode: 0o644, ModTime: modTime},
-			{Path: "d/s", Kind: KindSymlink, Size: 3, Mode: fs.ModeSymlink | 0o777, ModTime: modTime},
+			{Path: "d", Kind: KindDir, Size: 4096, Mode: fs.ModeDir | 0o755, ModTime: layoutModTime()},
+			{Path: "d/a", Kind: KindFile, Size: 258, Mode: 0o644, ModTime: layoutModTime()},
+			{Path: "d/s", Kind: KindSymlink, Size: 3, Mode: fs.ModeSymlink | 0o777, ModTime: layoutModTime()},
 		}
 
-		want := append(slices.Clone(header), fullArchiveCRC...)
-		want = append(want,
-			// 目录 d
-			0x02, 0x00, 0x00, 0x00, // Kind = 目录，后面 3 字节保留
-			0xED, 0x01, 0x00, 0x80, // Mode = ModeDir | 0755
-			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 4096
-		)
-		want = append(want, modTimeBytes...)
-		want = append(want, 0x01, 0x00, 0x00, 0x00) // PathLen = 1
-		want = append(want, zeroCRC...)
-		want = append(want, 'd')
-
-		want = append(want,
-			// 文件 d/a
-			0x01, 0x00, 0x00, 0x00, // Kind = 文件
-			0xA4, 0x01, 0x00, 0x00, // Mode = 0644
-			0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 258
-		)
-		want = append(want, modTimeBytes...)
-		want = append(want, 0x03, 0x00, 0x00, 0x00) // PathLen = 3
-		want = append(want, contentCRC...)
-		want = append(want, 'd', '/', 'a')
-		want = append(want, bytes.Repeat([]byte{'z'}, 258)...)
-		want = append(want, make([]byte, 254)...) // 补零到 512
-
-		want = append(want,
-			// 符号链接 d/s，没有数据区
-			0x03, 0x00, 0x00, 0x00, // Kind = 符号链接
-			0xFF, 0x01, 0x00, 0x08, // Mode = ModeSymlink | 0777
-			0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 3，是链接目标的长度
-		)
-		want = append(want, modTimeBytes...)
-		want = append(want, 0x03, 0x00, 0x00, 0x00) // PathLen = 3
-		want = append(want, zeroCRC...)
-		want = append(want, 'd', '/', 's')
-
-		got := packBytes(t, src, entries)
+		got, want := packBytes(t, src, entries), frozenSampleArchive()
 		if !bytes.Equal(got, want) {
 			n := min(len(got), len(want))
 			first := n
@@ -182,6 +126,73 @@ func TestPackLayoutIsFrozen(t *testing.T) {
 				"\n实际: % x\n期望: % x", first, len(got), len(want), got, want)
 		}
 	})
+}
+
+// layoutModTime 是布局测试用的固定修改时间
+func layoutModTime() time.Time { return time.Unix(1_000_000_000, 123_456_789) }
+
+// frozenHeader 是公共头，字段取值见 archive.go 的字段表
+func frozenHeader() []byte {
+	return []byte{
+		'D', 'B', 'K', 'P', // Magic
+		0x01, 0x00, // Version = 1
+		0x00, 0x00, // Algorithm = 0
+		0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 24
+	}
+}
+
+// frozenEmptyArchive 是空目录树的归档应该长什么样。CRC64 是用另一份
+// CRC-64/ECMA 实现算出来的，没有借助被测代码
+func frozenEmptyArchive() []byte {
+	return append(frozenHeader(), 0x9B, 0xF7, 0x46, 0x6E, 0x38, 0x25, 0xC7, 0x03)
+}
+
+// frozenSampleArchive 是"目录、文件、符号链接各一条"那份归档应该长什么样
+func frozenSampleArchive() []byte {
+	zeroCRC := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	want := append(frozenHeader(), 0x44, 0x76, 0x78, 0x5E, 0xB1, 0x36, 0x73, 0xCF)
+	want = append(want,
+		// 目录 d
+		0x02, 0x00, 0x00, 0x00, // Kind = 目录，后面 3 字节保留
+		0xED, 0x01, 0x00, 0x80, // Mode = ModeDir | 0755
+		0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 4096
+	)
+	want = append(want, frozenModTime()...)
+	want = append(want, 0x01, 0x00, 0x00, 0x00) // PathLen = 1
+	want = append(want, zeroCRC...)
+	want = append(want, 'd')
+
+	want = append(want,
+		// 文件 d/a
+		0x01, 0x00, 0x00, 0x00, // Kind = 文件
+		0xA4, 0x01, 0x00, 0x00, // Mode = 0644
+		0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 258
+	)
+	want = append(want, frozenModTime()...)
+	want = append(want, 0x03, 0x00, 0x00, 0x00)                         // PathLen = 3
+	want = append(want, 0xC6, 0x2D, 0x41, 0xBA, 0xA9, 0xB5, 0x38, 0x75) // 258 个 z 的 CRC64
+	want = append(want, 'd', '/', 'a')
+	want = append(want, bytes.Repeat([]byte{'z'}, 258)...)
+	want = append(want, make([]byte, 254)...) // 补零到 512
+
+	want = append(want,
+		// 符号链接 d/s，没有数据区
+		0x03, 0x00, 0x00, 0x00, // Kind = 符号链接
+		0xFF, 0x01, 0x00, 0x08, // Mode = ModeSymlink | 0777
+		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Size = 3，是链接目标的长度
+	)
+	want = append(want, frozenModTime()...)
+	want = append(want, 0x03, 0x00, 0x00, 0x00) // PathLen = 3
+	want = append(want, zeroCRC...)
+	return append(want, 'd', '/', 's')
+}
+
+// frozenModTime 是记录头里固定的修改时间字节：ModTimeSec 和 ModTimeNsec
+func frozenModTime() []byte {
+	return []byte{
+		0x00, 0xCA, 0x9A, 0x3B, 0x00, 0x00, 0x00, 0x00, // ModTimeSec = 1000000000
+		0x15, 0xCD, 0x5B, 0x07, // ModTimeNsec = 123456789
+	}
 }
 
 // 扫描之后文件可能被删掉、也可能被截短，Pack 要跳过它们继续打包，见 robust_test.go。
