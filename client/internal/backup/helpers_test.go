@@ -58,7 +58,7 @@ func packBytesAlgo(t *testing.T, root string, entries []Entry, algo Algorithm) [
 // readIndexOK 执行 ReadIndex，出错时让测试立即失败。
 func readIndexOK(t *testing.T, archive string) []Record {
 	t.Helper()
-	records, err := ReadIndex(archive)
+	records, err := ReadIndex(archive, "")
 	if err != nil {
 		t.Fatalf("Setup failed: ReadIndex(%q) error = %v", archive, err)
 	}

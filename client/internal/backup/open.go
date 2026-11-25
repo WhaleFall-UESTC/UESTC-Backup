@@ -1,24 +1,28 @@
 package backup
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"hash/crc64"
 	"io"
 	"os"
 
+	"client/internal/aescbc"
 	"client/internal/errs"
 )
 
-// header 是公共头里的字段
+// header 是公共头里的字段，Algorithm 为 AES 时还带着扩展头
 type header struct {
 	algorithm  Algorithm
 	dataOffset int64
 	crc        uint64
 	raw        []byte // 读到的 24 个字节
+	enc        encHeader
+	encRaw     []byte // 读到的 64 个字节
 }
 
-// readHeader 读公共头并校验魔数、版本和算法
+// readHeader 读公共头并校验魔数、版本和算法；加密归档连扩展头一起读
 func readHeader(r io.Reader, path string) (header, error) {
 	var h header
 	h.raw = make([]byte, archiveHeaderSize)
@@ -38,12 +42,32 @@ func readHeader(r io.Reader, path string) (header, error) {
 	}
 	h.dataOffset = int64(binary.LittleEndian.Uint64(h.raw[8:16]))
 	h.crc = binary.LittleEndian.Uint64(h.raw[16:24])
+	if h.algorithm == AlgorithmAES {
+		if err := h.readEnc(r, path); err != nil {
+			return header{}, err
+		}
+	}
 	return h, nil
 }
 
-// openArchive 打开归档，返回可读的归档文件，位置在开头。压缩归档先解压到临时文件，
-// 顺带核对存盘字节的 CRC64；调用方必须调用返回的 cleanup
-func openArchive(path string) (*os.File, func(), error) {
+// readEnc 读加密扩展头，要求数据偏移正好指向密文
+func (h *header) readEnc(r io.Reader, path string) error {
+	h.encRaw = make([]byte, archiveEncHeaderSize)
+	if _, err := io.ReadFull(r, h.encRaw); err != nil {
+		return incomplete(err, "encryption header is incomplete").At(path)
+	}
+	if h.dataOffset != archiveEncDataOffset {
+		return errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
+	}
+	copy(h.enc.salt[:], h.encRaw[0:aesSaltSize])
+	copy(h.enc.iv[:], h.encRaw[aesSaltSize:aesSaltSize+aesIVSize])
+	copy(h.enc.verifier[:], h.encRaw[aesSaltSize+aesIVSize:archiveEncHeaderSize])
+	return nil
+}
+
+// openArchive 打开归档，按需解密、解压到临时文件，返回位置在开头的内层 .dbkp。
+// password 在未加密的归档上被忽略；调用方必须调用返回的 cleanup
+func openArchive(path, password string) (*os.File, func(), error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -53,15 +77,81 @@ func openArchive(path string) (*os.File, func(), error) {
 		f.Close()
 		return nil, nil, err
 	}
-	if h.algorithm == AlgorithmNone {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			f.Close()
+
+	cleanup := func() { f.Close() }
+	if h.algorithm == AlgorithmAES {
+		if f, cleanup, err = decryptArchive(f, path, password, h); err != nil {
 			return nil, nil, err
 		}
-		return f, func() { f.Close() }, nil
+		// 解出来的是内层归档，它自己的公共头说明压缩算法
+		if h, err = readHeader(f, path); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
 	}
-	return uncompressArchive(f, path, h)
+	if h.algorithm == AlgorithmNone {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		return f, cleanup, nil
+	}
+
+	inner, innerCleanup, err := uncompressArchive(f, path, h)
+	cleanup() // uncompressArchive 已经关掉了 f，这里再清掉可能残留的临时文件
+	if err != nil {
+		return nil, nil, err
+	}
+	return inner, innerCleanup, nil
 }
+
+// decryptArchive 先核对口令，再把密文解到临时文件；存盘字节的 CRC64 对不上就删掉重来。
+// 口令不对时一个字节都不解
+func decryptArchive(f *os.File, path, password string, h header) (*os.File, func(), error) {
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
+		return nil, nil, errs.New(errs.Corrupted).At(path)
+	}
+
+	key := aescbc.DeriveKey(password, h.enc.salt[:])
+	if verifier := aescbc.Verifier(key); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
+		return nil, nil, errs.New(errs.WrongPassword).At(path)
+	}
+
+	tmp, err := os.CreateTemp("", "dbkp-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	crc := crc64.New(crcTable)
+	crc.Write(h.raw[:archiveHeaderSize-crcSize])
+	crc.Write(zeroCRC[:])
+	crc.Write(h.encRaw)
+	err = aescbc.Decrypt(io.TeeReader(f, crc), tmp, key, h.enc.iv[:])
+	if err == nil && crc.Sum64() != h.crc {
+		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
+	}
+	if errors.Is(err, aescbc.ErrPadding) {
+		err = errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, nil, err
+	}
+	return tmp, func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}, nil
+}
+
 func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
 	defer f.Close()
 

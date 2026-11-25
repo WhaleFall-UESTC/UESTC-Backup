@@ -9,8 +9,9 @@ import (
 )
 
 // Unpack 把归档还原到 dst；dst 非空就拒绝，中途出错清掉这次写的文件。
-func Unpack(archive, dst string) error {
-	f, cleanup, err := openArchive(archive)
+// password 在未加密的归档上被忽略
+func Unpack(archive, dst, password string) error {
+	f, cleanup, err := openArchive(archive, password)
 	if err != nil {
 		return err
 	}

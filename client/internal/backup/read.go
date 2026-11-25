@@ -14,8 +14,8 @@ import (
 )
 
 // ReadIndex 读出归档里的全部记录，顺序同打包时。它只跳过数据区，不校验记录内容
-func ReadIndex(archive string) ([]Record, error) {
-	f, cleanup, err := openArchive(archive)
+func ReadIndex(archive, password string) ([]Record, error) {
+	f, cleanup, err := openArchive(archive, password)
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +44,8 @@ func ReadIndex(archive string) ([]Record, error) {
 //
 // 有问题时返回 errs.Corrupted，路径是出问题的文件，看不出是哪个文件时是 archive。
 // 归档不完整时 Err 是 io.ErrUnexpectedEOF；文件打不开时错误原样返回。
-func Verify(archive string) error {
-	f, cleanup, err := openArchive(archive)
+func Verify(archive, password string) error {
+	f, cleanup, err := openArchive(archive, password)
 	if err != nil {
 		return err
 	}
