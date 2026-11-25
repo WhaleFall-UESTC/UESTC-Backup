@@ -1,14 +1,6 @@
-# docs/ai — AI 友好版课程资料
+# docs - 课程资料
 
-本目录是 `docs/` 下所有课件与文档的 Markdown 转换版，供 AI（及人）快速检索。
-原始文件保持不动；转换脚本见 `scripts/convert_docs_for_ai.py`，重新生成：
-`python scripts/convert_docs_for_ai.py`。
-
-每份 Markdown 头部 front matter 记录了 `source`（原始文件相对路径）、`pages`（页数）、`converted`（转换日期）；
-PDF 转换的文件用 `<!-- page n/total -->` 标注原文页码，便于对照原始 PDF。
-
-> 注意：课件 PDF 的幻灯片母版中残留一段"Qt 画图软件"示例文字，转换后会混入部分页面正文，
-> 属于原始 PDF 自带的隐藏文字，阅读时忽略即可。docx 合并单元格已做去重处理。
+本目录是所有课件与文档的 Markdown 转换版。本项目不保存 pdf 原始文件
 
 ## 期末要求速查（从下列文档提炼，详见 [课程期末要求速查.md](课程期末要求速查.md)）
 
