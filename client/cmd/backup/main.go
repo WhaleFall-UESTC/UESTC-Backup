@@ -1,4 +1,3 @@
-// Command backup 是备份引擎的命令行入口：pack、unpack、verify 三个子命令。
 package main
 
 import (
@@ -46,7 +45,6 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
-// usageErr 报参数错误，附上用法。
 func usageErr(format string, args ...any) error {
 	return fmt.Errorf("%s\n%s", fmt.Sprintf(format, args...), usage)
 }
@@ -94,7 +92,6 @@ func runVerify(args []string) error {
 	return nil
 }
 
-// exitCode 用错误类别当退出码；不是引擎错误时退 1。
 func exitCode(err error) int {
 	var e *errs.Error
 	if errors.As(err, &e) {
