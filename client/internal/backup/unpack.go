@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -8,16 +9,22 @@ import (
 	"client/internal/errs"
 )
 
+// UnpackOptions 是还原的可选参数
+type UnpackOptions struct {
+	Progress func(Progress)
+}
+
 // Unpack 把归档还原到 dst；dst 非空就拒绝，中途出错清掉这次写的文件。
 // password 在未加密的归档上被忽略
-func Unpack(archive, dst, password string) error {
+func Unpack(ctx context.Context, archive, dst, password string, opts UnpackOptions) error {
 	f, cleanup, err := openArchive(archive, password)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	if err := verifyArchive(archive, f); err != nil {
+	stats, err := verifyArchive(ctx, archive, f, nil)
+	if err != nil {
 		return err
 	}
 	if err := prepareTarget(dst); err != nil {
@@ -31,8 +38,24 @@ func Unpack(archive, dst, password string) error {
 	if err := a.readHeader(); err != nil {
 		return err
 	}
+	var doneFiles int
+	var doneBytes int64
 	err = a.each(func(rec Record) error {
-		return restoreRecord(a, archive, dst, rec)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := restoreRecord(a, archive, dst, rec); err != nil {
+			return err
+		}
+		if rec.Kind != KindFile {
+			return nil
+		}
+		doneFiles++
+		doneBytes += rec.Size
+		if opts.Progress != nil {
+			opts.Progress(Progress{Phase: PhaseRestoring, Path: rec.Path, DoneFiles: doneFiles, TotalFiles: stats.Files, DoneBytes: doneBytes, TotalBytes: stats.Bytes})
+		}
+		return nil
 	})
 	if err != nil {
 		// dst 开始时是空的

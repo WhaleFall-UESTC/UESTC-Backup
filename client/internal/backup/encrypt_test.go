@@ -166,12 +166,12 @@ func TestEncryptedArchiveRoundTrip(t *testing.T) {
 			if diff := diffRecords(readIndexOKPassword(t, archive, password), entries); diff != nil {
 				t.Errorf("ReadIndex() %v", diff)
 			}
-			if err := Verify(archive, password); err != nil {
+			if err := Verify(context.Background(), archive, password, VerifyOptions{}); err != nil {
 				t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 			}
 
 			dst := filepath.Join(t.TempDir(), "restore")
-			if err := Unpack(archive, dst, password); err != nil {
+			if err := Unpack(context.Background(), archive, dst, password, UnpackOptions{}); err != nil {
 				t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 			}
 			if problem := diffTree(root, dst); problem != nil {
@@ -182,7 +182,7 @@ func TestEncryptedArchiveRoundTrip(t *testing.T) {
 
 	t.Run("未加密的归档不用给口令", func(t *testing.T) {
 		archive := packTree(t, root, entries)
-		if err := Verify(archive, password); err != nil {
+		if err := Verify(context.Background(), archive, password, VerifyOptions{}); err != nil {
 			t.Errorf("Verify(%q) with a password on an unencrypted archive = %v, want <nil>", archive, err)
 		}
 	})
@@ -199,12 +199,12 @@ func TestEncryptedArchiveRejectsWrongPassword(t *testing.T) {
 			if _, err := ReadIndex(archive, password); !errors.Is(err, errs.ErrWrongPassword) {
 				t.Errorf("ReadIndex() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
 			}
-			if err := Verify(archive, password); !errors.Is(err, errs.ErrWrongPassword) {
+			if err := Verify(context.Background(), archive, password, VerifyOptions{}); !errors.Is(err, errs.ErrWrongPassword) {
 				t.Errorf("Verify() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
 			}
 
 			dst := t.TempDir()
-			err := Unpack(archive, dst, password)
+			err := Unpack(context.Background(), archive, dst, password, UnpackOptions{})
 			if !errors.Is(err, errs.ErrWrongPassword) {
 				t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
 			}
@@ -256,11 +256,11 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			if err := Verify(broken, password); !errors.Is(err, tc.want) {
+			if err := Verify(context.Background(), broken, password, VerifyOptions{}); !errors.Is(err, tc.want) {
 				t.Errorf("Verify(%q) error = %v, want errors.Is(err, %v)", broken, err, tc.want)
 			}
 			dst := t.TempDir()
-			if err := Unpack(broken, dst, password); !errors.Is(err, tc.want) {
+			if err := Unpack(context.Background(), broken, dst, password, UnpackOptions{}); !errors.Is(err, tc.want) {
 				t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, %v)", broken, dst, err, tc.want)
 			}
 			if got := entryNames(t, dst); len(got) != 0 {
@@ -285,10 +285,10 @@ func TestNestedEncryptionIsRejected(t *testing.T) {
 		t.Fatalf("Setup failed: sealArchive() error = %v", err)
 	}
 
-	if err := Verify(outer, "pw"); !errors.Is(err, errs.ErrUnsupportedVersion) {
+	if err := Verify(context.Background(), outer, "pw", VerifyOptions{}); !errors.Is(err, errs.ErrUnsupportedVersion) {
 		t.Errorf("Verify() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
 	}
-	if err := Unpack(outer, t.TempDir(), "pw"); !errors.Is(err, errs.ErrUnsupportedVersion) {
+	if err := Unpack(context.Background(), outer, t.TempDir(), "pw", UnpackOptions{}); !errors.Is(err, errs.ErrUnsupportedVersion) {
 		t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
 	}
 }
