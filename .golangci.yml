@@ -1,14 +1,51 @@
 version: "2"
 
+# gofmt 检查交给 wf 门禁做：Windows CRLF 检出会被 golangci 全量误报
 linters:
   default: standard
   enable:
     - bodyclose
+    - funlen
     - gosec
     - misspell
     - revive
     - unconvert
     - unparam
     - wastedassign
-
-# gofmt 检查由工作流独立步骤执行，避免 Windows CRLF 检出误报；v2 默认不启用任何 formatter
+  settings:
+    funlen:
+      lines: 50
+      statements: -1
+      ignore-comments: true
+    gosec:
+      excludes:
+        # 头字段按定宽小端存取，整数转换是有意的，越界由读侧校验拦下
+        - G115
+        # 命令行工具按用户给的路径读写文件
+        - G304
+    revive:
+      enable-default-rules: true
+      rules:
+        # 项目约定 Go 文件第一行直接写 package，不加包注释
+        - name: package-comments
+          disabled: true
+        - name: argument-limit
+          arguments: [5]
+        - name: file-length-limit
+          arguments:
+            - max: 400
+              skip-comments: false
+              skip-blank-lines: false
+        - name: max-control-nesting
+          arguments: [4]
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - funlen
+      - path: _test\.go
+        text: "file-length-limit|argument-limit"
+      # 测试里的固定口令、math/rand、mklink 都是有意为之
+      - path: _test\.go
+        linters:
+          - gosec

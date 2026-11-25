@@ -17,7 +17,7 @@ func compressFile(ctx context.Context, raw, tmp string, algo Algorithm) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.Create(tmp)
 	if err != nil {

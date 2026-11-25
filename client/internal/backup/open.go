@@ -74,11 +74,11 @@ func openArchive(path, password string) (*os.File, func(), error) {
 	}
 	h, err := readHeader(f, path)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, nil, err
 	}
 
-	cleanup := func() { f.Close() }
+	cleanup := func() { _ = f.Close() }
 	if h.algorithm == AlgorithmAES {
 		if f, cleanup, err = decryptArchive(f, path, password, h); err != nil {
 			return nil, nil, err
@@ -112,7 +112,7 @@ func openArchive(path, password string) (*os.File, func(), error) {
 // decryptArchive 先核对口令，再把密文解到临时文件；存盘字节的 CRC64 对不上就删掉重来。
 // 口令不对时一个字节都不解
 func decryptArchive(f *os.File, path, password string, h header) (*os.File, func(), error) {
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -137,7 +137,7 @@ func decryptArchive(f *os.File, path, password string, h header) (*os.File, func
 }
 
 func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -163,9 +163,9 @@ func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.
 		return nil, nil, err
 	}
 	crc := crc64.New(crcTable)
-	crc.Write(h.raw[:archiveHeaderSize-crcSize])
-	crc.Write(zeroCRC[:])
-	crc.Write(extra)
+	_, _ = crc.Write(h.raw[:archiveHeaderSize-crcSize])
+	_, _ = crc.Write(zeroCRC[:])
+	_, _ = crc.Write(extra)
 	src := io.TeeReader(r, crc)
 	err = transform(src, tmp)
 	if err == nil {
@@ -179,8 +179,8 @@ func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.
 		_, err = tmp.Seek(0, io.SeekStart)
 	}
 	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		var e *errs.Error
 		if errors.As(err, &e) {
 			return nil, nil, e.At(path)
@@ -188,7 +188,7 @@ func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.
 		return nil, nil, err
 	}
 	return tmp, func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 	}, nil
 }

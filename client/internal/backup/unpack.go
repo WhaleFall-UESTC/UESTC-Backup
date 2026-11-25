@@ -139,7 +139,7 @@ func (r *restorer) makeDir(target string, rec Record) error {
 	if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
 		r.created = append(r.created, target)
 	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
 	return nil
@@ -202,7 +202,7 @@ func freeName(target string) (string, error) {
 }
 
 func prepareTarget(dst string, conflict Conflict) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := os.MkdirAll(dst, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 		return err
 	}
 	if conflict != ConflictFail {

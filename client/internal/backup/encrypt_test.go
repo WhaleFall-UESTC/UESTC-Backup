@@ -306,7 +306,7 @@ func TestEncryptThenCompressDoesNotShrink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup failed: open the archive: %v", err)
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	var recompressed bytes.Buffer
 	if err := lz77.Compress(in, &recompressed); err != nil {
 		t.Fatalf("Setup failed: compress the ciphertext: %v", err)
