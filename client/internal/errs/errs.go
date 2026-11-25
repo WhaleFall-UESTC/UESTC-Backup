@@ -17,6 +17,7 @@ const (
 	IO
 	InvalidArgument
 	TargetNotEmpty
+	WrongPassword
 )
 
 var phrases = map[Code]string{
@@ -27,6 +28,7 @@ var phrases = map[Code]string{
 	IO:                 "i/o error",
 	InvalidArgument:    "invalid argument",
 	TargetNotEmpty:     "target directory is not empty",
+	WrongPassword:      "wrong password",
 }
 
 // String 返回类别的固定说法。
@@ -40,6 +42,7 @@ var (
 	ErrIO                 = &Error{Code: IO}
 	ErrInvalidArgument    = &Error{Code: InvalidArgument}
 	ErrTargetNotEmpty     = &Error{Code: TargetNotEmpty}
+	ErrWrongPassword      = &Error{Code: WrongPassword}
 )
 
 // Error 是引擎自己判定出来的错误。

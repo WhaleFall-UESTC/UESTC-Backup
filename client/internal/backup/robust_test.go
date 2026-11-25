@@ -211,7 +211,7 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 		t.Errorf("Pack() over an existing archive: error = %v, want <nil>", err)
 	}
-	if err := Verify(dst); err != nil {
+	if err := Verify(dst, ""); err != nil {
 		t.Errorf("Verify(%q) = %v, want <nil>", dst, err)
 	}
 }
@@ -220,14 +220,14 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 
 // checkArchiveOnlyHas 检查归档只剩 want，且整档校验通过。
 func checkArchiveOnlyHas(archive, want string) error {
-	records, err := ReadIndex(archive)
+	records, err := ReadIndex(archive, "")
 	if err != nil {
 		return fmt.Errorf("ReadIndex(%q) error = %v", archive, err)
 	}
 	if len(records) != 1 || records[0].Path != want {
 		return fmt.Errorf("ReadIndex() = %v, want only %q", records, want)
 	}
-	if err := Verify(archive); err != nil {
+	if err := Verify(archive, ""); err != nil {
 		return fmt.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 	}
 	return nil
