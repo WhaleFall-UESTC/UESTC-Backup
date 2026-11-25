@@ -34,7 +34,34 @@ func Compress(r io.ReadSeeker, w io.Writer) error {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return errs.Wrap(err, errs.IO)
 	}
+	freq, size, err := countFrequencies(r)
+	if err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
 
+	codes := buildCodes(buildTree(&freq))
+	bw := bufio.NewWriterSize(w, readBufSize)
+	if _, err := bw.Write(encodeHeader(&freq, size, codes)); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	bitsw := &bitWriter{w: bw}
+	if err := writeBits(r, bitsw, codes); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	if err := bitsw.flush(); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	if err := bw.Flush(); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	return nil
+}
+
+// countFrequencies 扫一遍 r，数每个字节的出现次数和总长度
+func countFrequencies(r io.Reader) ([symbolCount]uint64, uint64, error) {
 	var freq [symbolCount]uint64
 	var size uint64
 	err := eachChunk(r, func(p []byte) error {
@@ -44,14 +71,11 @@ func Compress(r io.ReadSeeker, w io.Writer) error {
 		size += uint64(len(p))
 		return nil
 	})
-	if err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
+	return freq, size, err
+}
 
-	codes := buildCodes(buildTree(&freq))
+// encodeHeader 拼出压缩头：魔数、补零位数、原始长度、词频表
+func encodeHeader(freq *[symbolCount]uint64, size uint64, codes *[symbolCount]string) []byte {
 	var bits uint64
 	for b, f := range freq {
 		bits += f * uint64(len(codes[b]))
@@ -64,13 +88,12 @@ func Compress(r io.ReadSeeker, w io.Writer) error {
 	for b, f := range freq {
 		binary.LittleEndian.PutUint64(header[freqIndex+b*8:], f)
 	}
+	return header
+}
 
-	bw := bufio.NewWriterSize(w, readBufSize)
-	if _, err := bw.Write(header); err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
-	bitsw := &bitWriter{w: bw}
-	err = eachChunk(r, func(p []byte) error {
+// writeBits 把 r 按码表编成比特流
+func writeBits(r io.Reader, bitsw *bitWriter, codes *[symbolCount]string) error {
+	return eachChunk(r, func(p []byte) error {
 		for _, b := range p {
 			if err := bitsw.write(codes[b]); err != nil {
 				return err
@@ -78,42 +101,14 @@ func Compress(r io.ReadSeeker, w io.Writer) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
-	if err := bitsw.flush(); err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
-	if err := bw.Flush(); err != nil {
-		return errs.Wrap(err, errs.IO)
-	}
-	return nil
 }
 
 // Decompress 解开 Huffman 编码的数据写到 w
 func Decompress(r io.Reader, w io.Writer) error {
 	br := bufio.NewReaderSize(r, readBufSize)
-	header := make([]byte, headerSize)
-	if _, err := io.ReadFull(br, header); err != nil {
-		return incomplete(err)
-	}
-	if string(header[:4]) != magic {
-		return errs.Newf(errs.Corrupted, "not a huffman stream")
-	}
-	padding := header[paddingIndex]
-	if padding > 7 {
-		return errs.Newf(errs.Corrupted, "padding is %d", padding)
-	}
-
-	var freq [symbolCount]uint64
-	var total uint64
-	for i := range freq {
-		freq[i] = binary.LittleEndian.Uint64(header[freqIndex+i*8:])
-		total += freq[i]
-	}
-	size := binary.LittleEndian.Uint64(header[sizeIndex:])
-	if total != size {
-		return errs.Newf(errs.Corrupted, "%d bytes but frequencies add up to %d", size, total)
+	freq, size, padding, err := readMeta(br)
+	if err != nil {
+		return err
 	}
 
 	root := buildTree(&freq)
@@ -123,6 +118,47 @@ func Decompress(r io.Reader, w io.Writer) error {
 
 	out := bufio.NewWriterSize(w, readBufSize)
 	bits := &bitReader{r: br}
+	if err := decodeInto(bits, root, size, out); err != nil {
+		return err
+	}
+	if restBits, restValue := bits.rest(); restBits != padding || restValue != 0 {
+		return errs.Newf(errs.Corrupted, "%d trailing bits, padding is %d", restBits, padding)
+	}
+	if err := out.Flush(); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	return nil
+}
+
+// readMeta 读压缩头，返回词频表、原始长度和补零位数
+func readMeta(br *bufio.Reader) ([symbolCount]uint64, uint64, uint8, error) {
+	var freq [symbolCount]uint64
+	header := make([]byte, headerSize)
+	if _, err := io.ReadFull(br, header); err != nil {
+		return freq, 0, 0, incomplete(err)
+	}
+	if string(header[:4]) != magic {
+		return freq, 0, 0, errs.Newf(errs.Corrupted, "not a huffman stream")
+	}
+	padding := header[paddingIndex]
+	if padding > 7 {
+		return freq, 0, 0, errs.Newf(errs.Corrupted, "padding is %d", padding)
+	}
+
+	var total uint64
+	for i := range freq {
+		freq[i] = binary.LittleEndian.Uint64(header[freqIndex+i*8:])
+		total += freq[i]
+	}
+	size := binary.LittleEndian.Uint64(header[sizeIndex:])
+	if total != size {
+		return freq, 0, 0, errs.Newf(errs.Corrupted, "%d bytes but frequencies add up to %d", size, total)
+	}
+	return freq, size, padding, nil
+}
+
+// decodeInto 按树把比特流解成 size 个字节写到 out
+func decodeInto(bits *bitReader, root *node, size uint64, out *bufio.Writer) error {
 	if root.leaf() {
 		// 只有一个符号时码表约定为 "0"，每个符号吃掉一个补出来的位
 		for i := uint64(0); i < size; i++ {
@@ -133,31 +169,26 @@ func Decompress(r io.Reader, w io.Writer) error {
 				return errs.Wrap(err, errs.IO)
 			}
 		}
-	} else {
-		n := root
-		for i := uint64(0); i < size; i++ {
-			for !n.leaf() {
-				bit, err := bits.next()
-				if err != nil {
-					return incomplete(err)
-				}
-				if bit == 0 {
-					n = n.left
-				} else {
-					n = n.right
-				}
+		return nil
+	}
+
+	n := root
+	for i := uint64(0); i < size; i++ {
+		for !n.leaf() {
+			bit, err := bits.next()
+			if err != nil {
+				return incomplete(err)
 			}
-			if err := out.WriteByte(n.sym); err != nil {
-				return errs.Wrap(err, errs.IO)
+			if bit == 0 {
+				n = n.left
+			} else {
+				n = n.right
 			}
-			n = root
 		}
-	}
-	if restBits, restValue := bits.rest(); restBits != padding || restValue != 0 {
-		return errs.Newf(errs.Corrupted, "%d trailing bits, padding is %d", restBits, padding)
-	}
-	if err := out.Flush(); err != nil {
-		return errs.Wrap(err, errs.IO)
+		if err := out.WriteByte(n.sym); err != nil {
+			return errs.Wrap(err, errs.IO)
+		}
+		n = root
 	}
 	return nil
 }
