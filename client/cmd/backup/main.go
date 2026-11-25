@@ -102,6 +102,9 @@ func runPack(ctx context.Context, args []string) error {
 
 func runUnpack(args []string) error {
 	flags, password, err := passwordFlags("unpack", args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -117,6 +120,9 @@ func runUnpack(args []string) error {
 
 func runVerify(args []string) error {
 	flags, password, err := passwordFlags("verify", args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
