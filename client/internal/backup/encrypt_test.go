@@ -171,7 +171,7 @@ func TestEncryptedArchiveRoundTrip(t *testing.T) {
 			}
 
 			dst := filepath.Join(t.TempDir(), "restore")
-			if err := Unpack(context.Background(), archive, dst, password, UnpackOptions{}); err != nil {
+			if _, err := Unpack(context.Background(), archive, dst, password, UnpackOptions{}); err != nil {
 				t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 			}
 			if problem := diffTree(root, dst); problem != nil {
@@ -204,7 +204,7 @@ func TestEncryptedArchiveRejectsWrongPassword(t *testing.T) {
 			}
 
 			dst := t.TempDir()
-			err := Unpack(context.Background(), archive, dst, password, UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, dst, password, UnpackOptions{})
 			if !errors.Is(err, errs.ErrWrongPassword) {
 				t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
 			}
@@ -260,7 +260,7 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 				t.Errorf("Verify(%q) error = %v, want errors.Is(err, %v)", broken, err, tc.want)
 			}
 			dst := t.TempDir()
-			if err := Unpack(context.Background(), broken, dst, password, UnpackOptions{}); !errors.Is(err, tc.want) {
+			if _, err := Unpack(context.Background(), broken, dst, password, UnpackOptions{}); !errors.Is(err, tc.want) {
 				t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, %v)", broken, dst, err, tc.want)
 			}
 			if got := entryNames(t, dst); len(got) != 0 {
@@ -288,7 +288,7 @@ func TestNestedEncryptionIsRejected(t *testing.T) {
 	if err := Verify(context.Background(), outer, "pw", VerifyOptions{}); !errors.Is(err, errs.ErrUnsupportedVersion) {
 		t.Errorf("Verify() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
 	}
-	if err := Unpack(context.Background(), outer, t.TempDir(), "pw", UnpackOptions{}); !errors.Is(err, errs.ErrUnsupportedVersion) {
+	if _, err := Unpack(context.Background(), outer, t.TempDir(), "pw", UnpackOptions{}); !errors.Is(err, errs.ErrUnsupportedVersion) {
 		t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
 	}
 }

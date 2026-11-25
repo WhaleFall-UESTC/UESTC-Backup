@@ -76,7 +76,7 @@ func TestUnpackProgressAndCancel(t *testing.T) {
 		var last Progress
 		opts := UnpackOptions{Progress: func(p Progress) { last = p }}
 		dst := filepath.Join(t.TempDir(), "restore")
-		if err := Unpack(context.Background(), archive, dst, "", opts); err != nil {
+		if _, err := Unpack(context.Background(), archive, dst, "", opts); err != nil {
 			t.Fatalf("Unpack() error = %v", err)
 		}
 		if last.Phase != PhaseRestoring || last.DoneFiles != 2 || last.DoneBytes != 2000 {
@@ -87,7 +87,7 @@ func TestUnpackProgressAndCancel(t *testing.T) {
 	t.Run("取消", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		dst := filepath.Join(t.TempDir(), "restore")
-		err := Unpack(ctx, archive, dst, "", UnpackOptions{Progress: func(Progress) { cancel() }})
+		_, err := Unpack(ctx, archive, dst, "", UnpackOptions{Progress: func(Progress) { cancel() }})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Unpack() error = %v, want context.Canceled", err)
 		}
