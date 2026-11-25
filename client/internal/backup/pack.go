@@ -116,9 +116,18 @@ func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
 	}
 
 	offset, crc := w.offset, w.crc
-	pathBytes := []byte(e.Path)
-	crcOffset := offset + crcFieldOffset
+	if _, err := w.Write(recordHeader(e)); err != nil {
+		return nil, err
+	}
+	if in == nil {
+		return nil, nil
+	}
+	return writeRecordData(w, in, e, offset, crc)
+}
 
+// recordHeader 拼出一条记录的头：定长字段加路径。
+func recordHeader(e Entry) []byte {
+	pathBytes := []byte(e.Path)
 	header := make([]byte, recordHeaderSize+len(pathBytes))
 	copy(header[recordHeaderSize:], pathBytes)
 	header[0] = byte(e.Kind)
@@ -127,14 +136,11 @@ func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
 	binary.LittleEndian.PutUint64(header[16:24], uint64(e.ModTime.Unix()))
 	binary.LittleEndian.PutUint32(header[24:28], uint32(e.ModTime.Nanosecond()))
 	binary.LittleEndian.PutUint32(header[28:32], uint32(len(pathBytes)))
+	return header
+}
 
-	if _, err := w.Write(header); err != nil {
-		return nil, err
-	}
-	if e.Kind != KindFile {
-		return nil, nil
-	}
-
+// writeRecordData 写文件内容的数据区并回填 CRC64，读不了时把这条记录退掉。
+func writeRecordData(w *archiveWriter, in io.Reader, e Entry, offset int64, crc uint64) (*Skip, error) {
 	content := crc64.New(crcTable)
 	n, err := io.CopyN(io.MultiWriter(w, content), in, e.Size)
 	if err != nil {
@@ -152,7 +158,7 @@ func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
 	if err := pad(w, e.Size); err != nil {
 		return nil, err
 	}
-	return nil, binary.Write(io.NewOffsetWriter(w.f, crcOffset), binary.LittleEndian, content.Sum64())
+	return nil, binary.Write(io.NewOffsetWriter(w.f, offset+crcFieldOffset), binary.LittleEndian, content.Sum64())
 }
 
 // pad 把 size 字节的数据区补零到 archiveAlignment 的整数倍。

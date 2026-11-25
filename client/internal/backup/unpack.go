@@ -28,29 +28,34 @@ func Unpack(archive, dst string) error {
 		return err
 	}
 	err = a.each(func(rec Record) error {
-		if !filepath.IsLocal(rec.Path) {
-			return errs.Newf(errs.Corrupted, "path %q is not local", rec.Path).At(archive)
-		}
-		target := filepath.Join(dst, filepath.FromSlash(rec.Path))
-		switch rec.Kind {
-		case KindDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return errs.Wrap(err, errs.IO).At(rec.Path)
-			}
-		case KindFile:
-			return a.restoreFile(rec, target)
-		case KindSymlink:
-			// 留到“文件类型支持”，要先给 Entry 加链接目标
-		default:
-			return errs.Newf(errs.Corrupted, "record kind %d", rec.Kind).At(archive)
-		}
-		return nil
+		return restoreRecord(a, archive, dst, rec)
 	})
 	if err != nil {
 		// dst 开始时是空的
 		_ = clearDir(dst)
 	}
 	return err
+}
+
+// restoreRecord 按一条记录在 dst 里建出目录或文件，符号链接跳过。
+func restoreRecord(a *archiveReader, archive, dst string, rec Record) error {
+	if !filepath.IsLocal(rec.Path) {
+		return errs.Newf(errs.Corrupted, "path %q is not local", rec.Path).At(archive)
+	}
+	target := filepath.Join(dst, filepath.FromSlash(rec.Path))
+	switch rec.Kind {
+	case KindDir:
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return errs.Wrap(err, errs.IO).At(rec.Path)
+		}
+	case KindFile:
+		return a.restoreFile(rec, target)
+	case KindSymlink:
+		// 留到“文件类型支持”，要先给 Entry 加链接目标
+	default:
+		return errs.Newf(errs.Corrupted, "record kind %d", rec.Kind).At(archive)
+	}
+	return nil
 }
 
 // clearDir 删掉 dir 里的内容，目录本身留着。
