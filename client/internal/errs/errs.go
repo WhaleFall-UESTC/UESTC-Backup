@@ -9,6 +9,7 @@ import (
 // Code 是错误类别。数值会拿去当命令行退出码，定下来就不再改，新的加在最后。
 type Code int
 
+// Code 的取值，数值就是命令行的退出码
 const (
 	NotArchive Code = iota + 1
 	UnsupportedVersion
@@ -34,6 +35,7 @@ var phrases = map[Code]string{
 // String 返回类别的固定说法。
 func (c Code) String() string { return phrases[c] }
 
+// 各类别的哨兵错误，用 errors.Is 判断
 var (
 	ErrNotArchive         = &Error{Code: NotArchive}
 	ErrUnsupportedVersion = &Error{Code: UnsupportedVersion}

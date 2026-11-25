@@ -49,7 +49,7 @@ func restoreRecord(a *archiveReader, archive, dst string, rec Record) error {
 	target := filepath.Join(dst, filepath.FromSlash(rec.Path))
 	switch rec.Kind {
 	case KindDir:
-		if err := os.MkdirAll(target, 0o755); err != nil {
+		if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 			return errs.Wrap(err, errs.IO).At(rec.Path)
 		}
 	case KindFile:
@@ -76,7 +76,7 @@ func clearDir(dir string) error {
 	return nil
 }
 func prepareTarget(dst string) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := os.MkdirAll(dst, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 		return err
 	}
 	entries, err := os.ReadDir(dst)

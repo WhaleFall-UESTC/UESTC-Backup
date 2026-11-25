@@ -211,7 +211,7 @@ func TestCompressHonorsContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup failed: create a file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.Write(randomBytes(100_000)); err != nil {
 		t.Fatalf("Setup failed: write the file: %v", err)
 	}
