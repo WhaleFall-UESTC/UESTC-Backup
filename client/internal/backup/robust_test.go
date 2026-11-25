@@ -49,7 +49,7 @@ func TestPackSkipsUnreadableFiles(t *testing.T) {
 			tc.damage(t, src)
 
 			archive := filepath.Join(t.TempDir(), "backup.dbkp")
-			skips, err := Pack(context.Background(), archive, src, entries, nil)
+			skips, err := Pack(context.Background(), archive, src, entries, PackOptions{})
 			if err != nil {
 				t.Fatalf("Pack() error = %v, want <nil>", err)
 			}
@@ -84,7 +84,7 @@ func TestPackContextCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries, nil)
+		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries, PackOptions{})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Pack() error = %v, want context.Canceled", err)
 		}
@@ -98,7 +98,7 @@ func TestPackContextCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries,
-			func(path string, _ int64) { cancel() })
+			PackOptions{Progress: func(path string, _ int64) { cancel() }})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Pack() error = %v, want context.Canceled", err)
 		}
@@ -131,7 +131,7 @@ func TestPackProgressReportsBytes(t *testing.T) {
 	}
 	var got []report
 	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries,
-		func(path string, bytes int64) { got = append(got, report{path, bytes}) })
+		PackOptions{Progress: func(path string, bytes int64) { got = append(got, report{path, bytes}) }})
 	if err != nil {
 		t.Fatalf("Pack() error = %v, want <nil>", err)
 	}
@@ -161,7 +161,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 
 	t.Run("源目录里面", func(t *testing.T) {
 		dst := filepath.Join(src, "sub", "backup.dbkp")
-		_, err := Pack(context.Background(), dst, src, scanOK(t, src), nil)
+		_, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{})
 		if problem := errOn(err, dst, errs.ErrInvalidArgument); problem != nil {
 			t.Errorf("Pack() %v", problem)
 		}
@@ -172,7 +172,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 	})
 
 	t.Run("路径就是源目录本身", func(t *testing.T) {
-		_, err := Pack(context.Background(), src, src, scanOK(t, src), nil)
+		_, err := Pack(context.Background(), src, src, scanOK(t, src), PackOptions{})
 		if problem := errOn(err, src, errs.ErrInvalidArgument); problem != nil {
 			t.Errorf("Pack() %v", problem)
 		}
@@ -180,7 +180,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 
 	t.Run("源目录的同名邻居", func(t *testing.T) {
 		dst := src + "x"
-		if _, err := Pack(context.Background(), dst, src, scanOK(t, src), nil); err != nil {
+		if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 			t.Errorf("Pack(%q) error = %v, want <nil>", dst, err)
 		}
 		if _, err := os.Stat(dst); err != nil {
@@ -196,7 +196,7 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a.txt"), "aaa")
 
-	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), nil); err != nil {
+	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 		t.Fatalf("Pack() error = %v", err)
 	}
 	left, err := os.ReadDir(dir)
@@ -208,7 +208,7 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(src, "b.txt"), "bbb")
-	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), nil); err != nil {
+	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 		t.Errorf("Pack() over an existing archive: error = %v, want <nil>", err)
 	}
 	if err := Verify(dst); err != nil {

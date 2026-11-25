@@ -28,7 +28,7 @@ const (
 func packTree(t *testing.T, root string, entries []Entry) string {
 	t.Helper()
 	archive := filepath.Join(t.TempDir(), "backup.dbkp")
-	if _, err := Pack(context.Background(), archive, root, entries, nil); err != nil {
+	if _, err := Pack(context.Background(), archive, root, entries, PackOptions{}); err != nil {
 		t.Fatalf("Setup failed: Pack() error = %v", err)
 	}
 	return archive

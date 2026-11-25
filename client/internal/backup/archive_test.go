@@ -191,7 +191,7 @@ func TestPackRejectsNegativeSize(t *testing.T) {
 	src := t.TempDir()
 	entries := []Entry{{Path: "neg.bin", Kind: KindFile, Size: -1}}
 
-	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries, nil)
+	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries, PackOptions{})
 	if problem := errOn(err, "neg.bin", errs.ErrInvalidArgument); problem != nil {
 		t.Errorf("Pack() %v", problem)
 	}

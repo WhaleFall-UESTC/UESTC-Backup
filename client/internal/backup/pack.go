@@ -12,8 +12,13 @@ import (
 	"client/internal/errs"
 )
 
+// PackOptions 是打包的可选参数。
+type PackOptions struct {
+	Progress func(path string, bytes int64)
+}
+
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
-func Pack(ctx context.Context, dst, src string, entries []Entry, progress func(path string, bytes int64)) ([]Skip, error) {
+func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
 	if err := rejectInsideSource(dst, src); err != nil {
 		return nil, err
 	}
@@ -25,7 +30,7 @@ func Pack(ctx context.Context, dst, src string, entries []Entry, progress func(p
 	}
 
 	w := &archiveWriter{f: out}
-	skips, err := writeArchive(ctx, w, src, entries, progress)
+	skips, err := writeArchive(ctx, w, src, entries, opts.Progress)
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}

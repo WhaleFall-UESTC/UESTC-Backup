@@ -59,7 +59,7 @@ func runPack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	skips, err := backup.Pack(ctx, dst, src, entries, nil)
+	skips, err := backup.Pack(ctx, dst, src, entries, backup.PackOptions{})
 	if err != nil {
 		return err
 	}
