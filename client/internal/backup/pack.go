@@ -14,19 +14,36 @@ import (
 
 // PackOptions 是打包的可选参数。
 type PackOptions struct {
-	Progress func(path string, bytes int64)
+	Algorithm Algorithm
+	Progress  func(path string, bytes int64)
 }
 
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
+// Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
 	if err := rejectInsideSource(dst, src); err != nil {
 		return nil, err
 	}
+	if !opts.Algorithm.known() {
+		return nil, errs.Newf(errs.InvalidArgument, "unknown algorithm %d", opts.Algorithm)
+	}
 
 	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
+	skips, size, err := packRaw(ctx, tmp, src, entries, opts)
 	if err != nil {
 		return nil, err
+	}
+	if err := finalize(ctx, tmp, size, dst, opts.Algorithm); err != nil {
+		return nil, err
+	}
+	return skips, nil
+}
+
+// packRaw 把 entries 写成不压缩的归档，返回它的字节数；失败时删掉半截文件
+func packRaw(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, int64, error) {
+	out, err := os.Create(dst)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	w := &archiveWriter{f: out}
@@ -34,14 +51,39 @@ func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOption
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}
-	if err == nil {
-		err = os.Rename(tmp, dst)
-	}
 	if err != nil {
-		_ = os.Remove(tmp)
-		return nil, err
+		_ = os.Remove(dst)
+		return nil, 0, err
 	}
-	return skips, nil
+	return skips, w.offset, nil
+}
+
+// finalize 把打好的 raw 落到 dst；algo 不为 0 时先压缩，压完不更小就留原样
+func finalize(ctx context.Context, raw string, rawSize int64, dst string, algo Algorithm) error {
+	keep := raw
+	if algo != AlgorithmNone {
+		compressed := dst + ".cmp.tmp"
+		size, err := compressFile(ctx, raw, compressed, algo)
+		if err != nil {
+			_ = os.Remove(compressed)
+			_ = os.Remove(raw)
+			return err
+		}
+		if size < rawSize {
+			keep = compressed
+		} else {
+			// 压不小，原样存
+			_ = os.Remove(compressed)
+		}
+	}
+
+	if err := os.Rename(keep, dst); err != nil {
+		_ = os.Remove(keep)
+		_ = os.Remove(raw)
+		return err
+	}
+	_ = os.Remove(raw) // 压缩版胜出时原样的那份要删掉
+	return nil
 }
 
 // rejectInsideSource 拒绝把归档放进源目录，否则它会把自己也打进去。
@@ -64,7 +106,7 @@ func rejectInsideSource(dst, src string) error {
 	return nil
 }
 func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []Entry, progress func(path string, bytes int64)) ([]Skip, error) {
-	if err := writeArchiveHeader(w); err != nil {
+	if err := writeArchiveHeader(w, AlgorithmNone); err != nil {
 		return nil, err
 	}
 
@@ -92,12 +134,12 @@ func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []E
 	err := binary.Write(io.NewOffsetWriter(w.f, archiveHeaderSize-crcSize), binary.LittleEndian, w.crc)
 	return skips, err
 }
-func writeArchiveHeader(w io.Writer) error {
+func writeArchiveHeader(w io.Writer, algo Algorithm) error {
 	header := make([]byte, archiveHeaderSize)
 
 	copy(header[0:4], archiveMagic)
 	binary.LittleEndian.PutUint16(header[4:6], archiveVersion)
-	binary.LittleEndian.PutUint16(header[6:8], uint16(AlgorithmNone))
+	binary.LittleEndian.PutUint16(header[6:8], uint16(algo))
 	binary.LittleEndian.PutUint64(header[8:16], uint64(archiveHeaderSize))
 
 	_, err := w.Write(header)
