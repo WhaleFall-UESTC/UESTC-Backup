@@ -13,14 +13,13 @@ import (
 	"client/internal/errs"
 )
 
-// 扫描之后源文件还在变：删掉的、截短的。这两种都算“读不了”，要跳过它们继续打包，
-// 原因进错误清单；其余文件照常进归档，归档本身照样校验通过。
+// 扫描后源文件被删或被截短，Pack 跳过它，其余照常打包。
 func TestPackSkipsUnreadableFiles(t *testing.T) {
 	tests := []struct {
 		name   string
 		damage func(t *testing.T, src string)
-		want   error // errs 里对应的类别
-		wantIs error // 底层错误，调用方靠它决定怎么补偿
+		want   error
+		wantIs error
 	}{
 		{
 			name: "文件删掉了",
@@ -35,7 +34,7 @@ func TestPackSkipsUnreadableFiles(t *testing.T) {
 		{
 			name: "文件被截短了",
 			damage: func(t *testing.T, src string) {
-				writeFile(t, filepath.Join(src, "a.txt"), "a") // 记录里的 Size 还是 3
+				writeFile(t, filepath.Join(src, "a.txt"), "a")
 			},
 			want:   errs.ErrSourceChanged,
 			wantIs: io.ErrUnexpectedEOF,
@@ -73,8 +72,7 @@ func TestPackSkipsUnreadableFiles(t *testing.T) {
 	}
 }
 
-// 取消之后 Pack 返回 context.Canceled，目标目录里连临时文件都不留——
-// 半截归档留在目标位置上，调用方很难分辨它是不是完整的。
+// 取消后不留任何文件，连临时文件也不留。
 func TestPackContextCancel(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a.txt"), "aaa")
@@ -110,13 +108,12 @@ func TestPackContextCancel(t *testing.T) {
 	})
 }
 
-// progress 每写完一个文件报告一次：已处理字节数只增不减，收尾时等于全部文件大小之和。
-// 空文件也要报告，只是字节数不前进——否则调用方收不到它的进度。
+// 已处理字节数只增不减，收尾等于所有文件大小之和。
 func TestPackProgressReportsBytes(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a.txt"), "aaa")
 	writeFile(t, filepath.Join(src, "empty.txt"), "")
-	writeFile(t, filepath.Join(src, "sub", "b.bin"), string(dataBytes(150_000))) // 比读缓冲区大
+	writeFile(t, filepath.Join(src, "sub", "b.bin"), string(dataBytes(150_000)))
 	entries := scanOK(t, src)
 
 	var want []string
@@ -157,8 +154,7 @@ func TestPackProgressReportsBytes(t *testing.T) {
 	}
 }
 
-// 归档不能放进源目录：临时文件会在扫描之后出现，被当成源文件打进它自己。
-// 刚好是源目录邻居的路径不算在里面，必须照常打包。
+// 归档不能放进源目录，前缀相同的邻居不算。
 func TestPackRejectsArchiveInsideSource(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a.txt"), "aaa")
@@ -169,7 +165,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 		if problem := errOn(err, dst, errs.ErrInvalidArgument); problem != nil {
 			t.Errorf("Pack() %v", problem)
 		}
-		// 拒绝发生在建临时文件之前，源目录里不该多出 sub 来
+		// 拒绝发生在建临时文件之前
 		if _, statErr := os.Stat(filepath.Join(src, "sub")); !errors.Is(statErr, fs.ErrNotExist) {
 			t.Errorf("stat %q = %v, want ErrNotExist", filepath.Join(src, "sub"), statErr)
 		}
@@ -183,7 +179,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 	})
 
 	t.Run("源目录的同名邻居", func(t *testing.T) {
-		dst := src + "x" // 前缀相同但不在源目录里面的路径
+		dst := src + "x"
 		if _, err := Pack(context.Background(), dst, src, scanOK(t, src), nil); err != nil {
 			t.Errorf("Pack(%q) error = %v, want <nil>", dst, err)
 		}
@@ -193,7 +189,7 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 	})
 }
 
-// 成功打包后 dst 旁边不留临时文件；再往同一个 dst 打包时直接覆盖上次的归档。
+// 成功后不留临时文件；再打一次覆盖已有归档。
 func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "backup.dbkp")
@@ -220,12 +216,11 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	}
 }
 
-// 还原到一半出错时，这一次写出来的文件要清掉，只剩下一个空的 dst。
-// 否则用户面对的是一个既不像成功也不像失败的半截目录。
+// 还原中途出错，dst 里不留这次写的文件。
 func TestUnpackClearsPartialOutput(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a", "b"), "")
-	// 两条记录是父子关系，父的那条是文件：写 a 成功，接着建 a/b 就建不出来
+	// 两条记录是父子关系，父的是文件：写 a 成功，建 a/b 失败
 	archive := packTree(t, src, []Entry{
 		{Path: "a", Kind: KindFile},
 		{Path: "a/b", Kind: KindFile},
@@ -243,8 +238,7 @@ func TestUnpackClearsPartialOutput(t *testing.T) {
 
 // ---------- 辅助函数 ----------
 
-// checkArchiveOnlyHas 检查归档里只剩 want 这一个文件，并且整档校验通过：
-// 跳过发生在记录头已经写盘之后，退回去的字节数对不对，只有校验值能查出来。
+// checkArchiveOnlyHas 检查归档只剩 want，且整档校验通过。
 func checkArchiveOnlyHas(archive, want string) error {
 	records, err := ReadIndex(archive)
 	if err != nil {
@@ -259,7 +253,7 @@ func checkArchiveOnlyHas(archive, want string) error {
 	return nil
 }
 
-// checkNothingLeft 检查 dir 里没有任何文件留下来。
+// checkNothingLeft 检查 dir 是空的。
 func checkNothingLeft(dir string) error {
 	left, err := os.ReadDir(dir)
 	if err != nil {
