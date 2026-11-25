@@ -11,6 +11,4 @@ linters:
     - unparam
     - wastedassign
 
-# gofmt 检查交给 wf 门禁做：Windows CRLF 检出会被 golangci 全量误报
-formatters:
-  default: none
+# gofmt 检查由工作流独立步骤执行，避免 Windows CRLF 检出误报；v2 默认不启用任何 formatter
