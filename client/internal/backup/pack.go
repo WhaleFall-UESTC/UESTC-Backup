@@ -12,19 +12,21 @@ import (
 	"client/internal/errs"
 )
 
-// PackOptions 是打包的可选参数。
+// PackOptions 是打包的可选参数。Password 不为空时，压缩之后再加密
 type PackOptions struct {
 	Algorithm Algorithm
+	Password  string
 	Progress  func(path string, bytes int64)
 }
 
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
-// Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样
+// Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样；
+// Password 不为空时再加密整份归档
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
 	if err := rejectInsideSource(dst, src); err != nil {
 		return nil, err
 	}
-	if !opts.Algorithm.known() {
+	if !opts.Algorithm.compressible() {
 		return nil, errs.Newf(errs.InvalidArgument, "unknown algorithm %d", opts.Algorithm)
 	}
 
@@ -33,7 +35,7 @@ func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOption
 	if err != nil {
 		return nil, err
 	}
-	if err := finalize(ctx, tmp, size, dst, opts.Algorithm); err != nil {
+	if err := finalize(ctx, tmp, size, dst, opts); err != nil {
 		return nil, err
 	}
 	return skips, nil
@@ -58,31 +60,43 @@ func packRaw(ctx context.Context, dst, src string, entries []Entry, opts PackOpt
 	return skips, w.offset, nil
 }
 
-// finalize 把打好的 raw 落到 dst；algo 不为 0 时先压缩，压完不更小就留原样
-func finalize(ctx context.Context, raw string, rawSize int64, dst string, algo Algorithm) error {
+// finalize 依次接上压缩和加密，把成品落到 dst；中间文件不论成败都清掉
+func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts PackOptions) error {
+	temps := []string{raw}
+	cleanup := func() {
+		for _, p := range temps {
+			_ = os.Remove(p)
+		}
+	}
+
 	keep := raw
-	if algo != AlgorithmNone {
+	if opts.Algorithm != AlgorithmNone {
 		compressed := dst + ".cmp.tmp"
-		size, err := compressFile(ctx, raw, compressed, algo)
+		temps = append(temps, compressed)
+		size, err := compressFile(ctx, raw, compressed, opts.Algorithm)
 		if err != nil {
-			_ = os.Remove(compressed)
-			_ = os.Remove(raw)
+			cleanup()
 			return err
 		}
 		if size < rawSize {
 			keep = compressed
-		} else {
-			// 压不小，原样存
-			_ = os.Remove(compressed)
 		}
+	}
+	if opts.Password != "" {
+		encrypted := dst + ".enc.tmp"
+		temps = append(temps, encrypted)
+		if err := encryptFile(ctx, keep, encrypted, opts.Password); err != nil {
+			cleanup()
+			return err
+		}
+		keep = encrypted
 	}
 
 	if err := os.Rename(keep, dst); err != nil {
-		_ = os.Remove(keep)
-		_ = os.Remove(raw)
+		cleanup()
 		return err
 	}
-	_ = os.Remove(raw) // 压缩版胜出时原样的那份要删掉
+	cleanup() // keep 已经改名到 dst，剩下的是输掉的那几份
 	return nil
 }
 
@@ -140,7 +154,7 @@ func writeArchiveHeader(w io.Writer, algo Algorithm) error {
 	copy(header[0:4], archiveMagic)
 	binary.LittleEndian.PutUint16(header[4:6], archiveVersion)
 	binary.LittleEndian.PutUint16(header[6:8], uint16(algo))
-	binary.LittleEndian.PutUint64(header[8:16], uint64(archiveHeaderSize))
+	binary.LittleEndian.PutUint64(header[8:16], uint64(headerDataOffset(algo)))
 
 	_, err := w.Write(header)
 	return err
