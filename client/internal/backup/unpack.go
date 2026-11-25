@@ -16,6 +16,7 @@ import (
 // Conflict 是还原时遇到已有路径的处理办法
 type Conflict uint8
 
+// Conflict 的取值
 const (
 	ConflictFail      Conflict = iota // 目标非空就拒绝，默认
 	ConflictOverwrite                 // 覆盖同名文件
@@ -139,7 +140,7 @@ func (r *restorer) makeDir(target string, rec Record) error {
 	if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
 		r.created = append(r.created, target)
 	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
 	return nil
@@ -202,7 +203,7 @@ func freeName(target string) (string, error) {
 }
 
 func prepareTarget(dst string, conflict Conflict) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := os.MkdirAll(dst, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
 		return err
 	}
 	if conflict != ConflictFail {

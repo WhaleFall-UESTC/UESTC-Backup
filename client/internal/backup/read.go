@@ -137,11 +137,11 @@ type archiveReader struct {
 
 // incomplete 把“归档提前结束了”包成 errs.Corrupted。
 // io.EOF 要换成 io.ErrUnexpectedEOF：each 靠 errors.Is(err, io.EOF) 认正常结束，不能让它成立。
-func incomplete(err error, format string, args ...any) *errs.Error {
+func incomplete(err error, detail string) *errs.Error {
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF
 	}
-	return errs.Wrapf(err, errs.Corrupted, format, args...)
+	return &errs.Error{Code: errs.Corrupted, Detail: detail, Err: err}
 }
 
 // readHeader 读公共头，把文件位置移到第一条记录。
@@ -151,8 +151,8 @@ func (a *archiveReader) readHeader() error {
 		return err
 	}
 	if a.sum != nil {
-		a.sum.Write(h.raw[:archiveHeaderSize-crcSize])
-		a.sum.Write(zeroCRC[:])
+		_, _ = a.sum.Write(h.raw[:archiveHeaderSize-crcSize])
+		_, _ = a.sum.Write(zeroCRC[:])
 	}
 	info, err := a.f.Stat()
 	if err != nil {
@@ -189,10 +189,10 @@ func (a *archiveReader) next() (Record, error) {
 		return Record{}, incomplete(err, "record path is incomplete").At(a.path)
 	}
 	if a.sum != nil {
-		a.sum.Write(buf[:crcFieldOffset])
-		a.sum.Write(zeroCRC[:])
-		a.sum.Write(buf[crcFieldOffset+crcSize:])
-		a.sum.Write(path)
+		_, _ = a.sum.Write(buf[:crcFieldOffset])
+		_, _ = a.sum.Write(zeroCRC[:])
+		_, _ = a.sum.Write(buf[crcFieldOffset+crcSize:])
+		_, _ = a.sum.Write(path)
 	}
 
 	sec := int64(binary.LittleEndian.Uint64(buf[16:24]))

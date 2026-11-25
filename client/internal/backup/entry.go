@@ -9,8 +9,10 @@ import (
 	"time"
 )
 
+// Kind 是节点的类型
 type Kind uint8
 
+// 文件、目录、符号链接
 const (
 	KindFile Kind = iota + 1
 	KindDir
@@ -112,7 +114,7 @@ func FileCRC64(path string) (crc uint64, size int64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	table := crc64.MakeTable(crc64.ECMA)
 	h := crc64.New(table)
