@@ -2,7 +2,8 @@ bin/
 *.exe
 server/data/
 client/build/bin/
-client/frontend/dist/
+client/frontend/dist/*
+!client/frontend/dist/.gitkeep
 .vscode/
 .idea/
 

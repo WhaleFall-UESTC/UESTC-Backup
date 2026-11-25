@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash"
@@ -63,37 +64,87 @@ var (
 	zeroCRC  [crcSize]byte
 )
 
-// Pack 把 entries 列出的节点从 src 读出来，连同文件内容写成一份 .dbkp 归档放到 dst。
-// dst 已存在就覆盖。
-//
-// 某条记录出错时返回带路径的 *errs.Error：文件读不出来是 errs.IO，Err 是底层错误；
-// 文件比 Entry.Size 短是 errs.SourceChanged，Err 是 io.ErrUnexpectedEOF；
-// Entry.Size 是负数是 errs.InvalidArgument。其余错误原样返回。
-func Pack(dst, src string, entries []Entry) error {
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
+// Skip 是打包时跳过的文件。
+type Skip struct {
+	Path string
+	Err  error
+}
+
+// Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
+func Pack(ctx context.Context, dst, src string, entries []Entry, progress func(path string, bytes int64)) ([]Skip, error) {
+	if err := rejectInsideSource(dst, src); err != nil {
+		return nil, err
 	}
 
-	w := &archiveWriter{f: out, sum: crc64.New(crcTable)}
-	err = writeArchive(w, src, entries)
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return nil, err
+	}
+
+	w := &archiveWriter{f: out}
+	skips, err := writeArchive(ctx, w, src, entries, progress)
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}
-	return err
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	return skips, nil
 }
 
-func writeArchive(w *archiveWriter, src string, entries []Entry) error {
-	if err := writeArchiveHeader(w); err != nil {
+// rejectInsideSource 拒绝把归档放进源目录，否则它会把自己也打进去。
+func rejectInsideSource(dst, src string) error {
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
 		return err
 	}
+	absDst, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(absSrc, absDst)
+	if err != nil {
+		return nil
+	}
+	if filepath.IsLocal(rel) {
+		return errs.Newf(errs.InvalidArgument, "archive is inside the source directory").At(dst)
+	}
+	return nil
+}
+
+func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []Entry, progress func(path string, bytes int64)) ([]Skip, error) {
+	if err := writeArchiveHeader(w); err != nil {
+		return nil, err
+	}
+
+	var skips []Skip
+	var written int64
 	for _, e := range entries {
-		if err := writeArchiveRecord(w, src, e); err != nil {
-			return err
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		skip, err := writeArchiveRecord(w, src, e)
+		if err != nil {
+			return nil, err
+		}
+		if skip != nil {
+			skips = append(skips, *skip)
+			continue
+		}
+		if e.Kind == KindFile && progress != nil {
+			written += e.Size
+			progress(e.Path, written)
 		}
 	}
+
 	// 回填公共头里的校验值
-	return binary.Write(io.NewOffsetWriter(w.f, archiveHeaderSize-crcSize), binary.LittleEndian, w.sum.Sum64())
+	err := binary.Write(io.NewOffsetWriter(w.f, archiveHeaderSize-crcSize), binary.LittleEndian, w.crc)
+	return skips, err
 }
 
 func writeArchiveHeader(w io.Writer) error {
@@ -108,15 +159,26 @@ func writeArchiveHeader(w io.Writer) error {
 	return err
 }
 
-func writeArchiveRecord(w *archiveWriter, src string, e Entry) error {
+// writeArchiveRecord 写一条记录；文件读不了时返回 Skip，不算致命错误。
+func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
 	if e.Size < 0 {
-		return errs.Newf(errs.InvalidArgument, "size %d", e.Size).At(e.Path)
+		return nil, errs.Newf(errs.InvalidArgument, "size %d", e.Size).At(e.Path)
 	}
 
-	pathBytes := []byte(e.Path)
-	crcOffset := w.offset + crcFieldOffset
+	var in *os.File
+	if e.Kind == KindFile {
+		f, err := os.Open(filepath.Join(src, filepath.FromSlash(e.Path)))
+		if err != nil {
+			return &Skip{Path: e.Path, Err: errs.Wrap(err, errs.IO).At(e.Path)}, nil
+		}
+		defer f.Close()
+		in = f
+	}
 
-	// CRC64 先留 0，文件内容写完后回填
+	offset, crc := w.offset, w.crc
+	pathBytes := []byte(e.Path)
+	crcOffset := offset + crcFieldOffset
+
 	header := make([]byte, recordHeaderSize+len(pathBytes))
 	copy(header[recordHeaderSize:], pathBytes)
 	header[0] = byte(e.Kind)
@@ -127,31 +189,30 @@ func writeArchiveRecord(w *archiveWriter, src string, e Entry) error {
 	binary.LittleEndian.PutUint32(header[28:32], uint32(len(pathBytes)))
 
 	if _, err := w.Write(header); err != nil {
-		return err
+		return nil, err
 	}
 	if e.Kind != KindFile {
-		return nil
+		return nil, nil
 	}
-
-	in, err := os.Open(filepath.Join(src, filepath.FromSlash(e.Path)))
-	if err != nil {
-		return errs.Wrap(err, errs.IO).At(e.Path)
-	}
-	defer in.Close()
 
 	content := crc64.New(crcTable)
 	n, err := io.CopyN(io.MultiWriter(w, content), in, e.Size)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			// 源文件不够长。同 incomplete，不把 io.EOF 接进错误链
-			return errs.Wrapf(io.ErrUnexpectedEOF, errs.SourceChanged, "read %d of %d bytes", n, e.Size).At(e.Path)
+			err = errs.Wrapf(io.ErrUnexpectedEOF, errs.SourceChanged, "read %d of %d bytes", n, e.Size).At(e.Path)
+		} else {
+			err = errs.Wrap(err, errs.IO).At(e.Path)
 		}
-		return errs.Wrap(err, errs.IO).At(e.Path)
+		if rbErr := w.rollback(offset, crc); rbErr != nil {
+			return nil, rbErr
+		}
+		return &Skip{Path: e.Path, Err: err}, nil
 	}
 	if err := pad(w, e.Size); err != nil {
-		return err
+		return nil, err
 	}
-	return binary.Write(io.NewOffsetWriter(w.f, crcOffset), binary.LittleEndian, content.Sum64())
+	return nil, binary.Write(io.NewOffsetWriter(w.f, crcOffset), binary.LittleEndian, content.Sum64())
 }
 
 // pad 把 size 字节的数据区补零到 archiveAlignment 的整数倍。
@@ -168,19 +229,28 @@ func paddedSize(size int64) int64 {
 	return (size + archiveAlignment - 1) / archiveAlignment * archiveAlignment
 }
 
-// archiveWriter 顺序写归档，同时算整份归档的校验值。
-// 回填 CRC64 字段时不经过它，所以校验值里这些字段按 0 算。
+// archiveWriter 顺序写归档并累计整档的 CRC64，跳过文件时能退回之前的状态。
 type archiveWriter struct {
 	f      *os.File
-	sum    hash.Hash64
-	offset int64 // 已写的字节数
+	crc    uint64
+	offset int64
 }
 
 func (w *archiveWriter) Write(p []byte) (int, error) {
 	n, err := w.f.Write(p)
-	w.sum.Write(p[:n])
+	w.crc = crc64.Update(w.crc, crcTable, p[:n])
 	w.offset += int64(n)
 	return n, err
+}
+
+// rollback 把归档退回 offset 处，好像那条记录没写过。
+func (w *archiveWriter) rollback(offset int64, crc uint64) error {
+	w.offset, w.crc = offset, crc
+	if err := w.f.Truncate(offset); err != nil {
+		return err
+	}
+	_, err := w.f.Seek(offset, io.SeekStart)
+	return err
 }
 
 // ReadIndex 读出归档里的全部记录，顺序同打包时。它只跳过数据区，不校验任何内容。
@@ -237,9 +307,7 @@ func Verify(archive string) error {
 	return err
 }
 
-// Unpack 按记录顺序把归档还原到 dst，里面已经有东西就拒绝（errs.TargetNotEmpty）。
-// 动 dst 之前先经 Verify 核对，有问题一个文件都不写；路径非法或 Kind 不认识报 errs.Corrupted（路径是归档），
-// 写盘失败报 errs.IO（路径是那条记录）。符号链接跳过，中途出错不清理已经写出的文件。
+// Unpack 把归档还原到 dst；dst 非空就拒绝，中途出错清掉这次写的文件。
 func Unpack(archive, dst string) error {
 	if err := Verify(archive); err != nil {
 		return err
@@ -258,7 +326,7 @@ func Unpack(archive, dst string) error {
 	if err := a.readHeader(); err != nil {
 		return err
 	}
-	return a.each(func(rec Record) error {
+	err = a.each(func(rec Record) error {
 		if !filepath.IsLocal(rec.Path) {
 			return errs.Newf(errs.Corrupted, "path %q is not local", rec.Path).At(archive)
 		}
@@ -277,6 +345,25 @@ func Unpack(archive, dst string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		// dst 开始时是空的
+		_ = clearDir(dst)
+	}
+	return err
+}
+
+// clearDir 删掉 dir 里的内容，目录本身留着。
+func clearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func prepareTarget(dst string) error {

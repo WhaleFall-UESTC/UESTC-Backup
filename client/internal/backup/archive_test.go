@@ -2,6 +2,7 @@ package backup
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -360,42 +361,14 @@ func TestReadIndexRejectsBadDataOffset(t *testing.T) {
 	}
 }
 
-// 扫描之后文件可能被删掉，也可能被截短，两种情况都要报错，并且带着出问题的那条记录。
-func TestPackReportsUnreadableFile(t *testing.T) {
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "short.txt"), "abc")
-
-	t.Run("文件不存在", func(t *testing.T) {
-		entries := []Entry{{Path: "gone.txt", Kind: KindFile, Size: 3}}
-		err := Pack(filepath.Join(t.TempDir(), "x.dbkp"), src, entries)
-		if problem := errOn(err, "gone.txt", errs.ErrIO); problem != nil {
-			t.Errorf("Pack() %v", problem)
-		}
-		// 底层的 fs.ErrNotExist 要还在
-		if !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("Pack() error = %v, want errors.Is(err, fs.ErrNotExist)", err)
-		}
-	})
-
-	t.Run("文件比记录的短", func(t *testing.T) {
-		entries := []Entry{{Path: "short.txt", Kind: KindFile, Size: 10}}
-		err := Pack(filepath.Join(t.TempDir(), "x.dbkp"), src, entries)
-		if problem := errOn(err, "short.txt", errs.ErrSourceChanged); problem != nil {
-			t.Errorf("Pack() %v", problem)
-		}
-		if !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Errorf("Pack() error = %v, want errors.Is(err, io.ErrUnexpectedEOF)", err)
-		}
-	})
-}
-
+// 扫描之后文件可能被删掉、也可能被截短，Pack 要跳过它们继续打包，见 robust_test.go。
 // Entry 是调用方给的数据。Size 为负时直接转成 uint64 会回绕成一个巨大的数，
 // 写出来的归档头和实际内容对不上，所以要拒掉。
 func TestPackRejectsNegativeSize(t *testing.T) {
 	src := t.TempDir()
 	entries := []Entry{{Path: "neg.bin", Kind: KindFile, Size: -1}}
 
-	err := Pack(filepath.Join(t.TempDir(), "x.dbkp"), src, entries)
+	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries, nil)
 	if problem := errOn(err, "neg.bin", errs.ErrInvalidArgument); problem != nil {
 		t.Errorf("Pack() %v", problem)
 	}
@@ -806,7 +779,7 @@ func TestUnpackReportsUnwritableEntry(t *testing.T) {
 func packTree(t *testing.T, root string, entries []Entry) string {
 	t.Helper()
 	archive := filepath.Join(t.TempDir(), "backup.dbkp")
-	if err := Pack(archive, root, entries); err != nil {
+	if _, err := Pack(context.Background(), archive, root, entries, nil); err != nil {
 		t.Fatalf("Setup failed: Pack() error = %v", err)
 	}
 	return archive
