@@ -23,7 +23,7 @@ type PackOptions struct {
 // Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样；
 // Password 不为空时再加密整份归档
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
-	if err := rejectInsideSource(dst, src); err != nil {
+	if err := CheckDestination(dst, src); err != nil {
 		return nil, err
 	}
 	if !opts.Algorithm.compressible() {
@@ -102,8 +102,8 @@ func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts P
 	return nil
 }
 
-// rejectInsideSource 拒绝把归档放进源目录，否则它会把自己也打进去。
-func rejectInsideSource(dst, src string) error {
+// CheckDestination 拒绝把归档放进源目录，否则它会把自己也打进去。
+func CheckDestination(dst, src string) error {
 	absSrc, err := filepath.Abs(src)
 	if err != nil {
 		return err

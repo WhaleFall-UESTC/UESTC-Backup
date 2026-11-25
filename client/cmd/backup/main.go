@@ -18,10 +18,15 @@ const usage = `用法:
   backup pack [-algo none|lz77|huffman] [-password 口令] [-progress=false] <源目录> <归档>
   backup unpack [-password 口令] [-progress=false] <归档> <目标目录>
   backup verify [-password 口令] [-progress=false] <归档>
+  backup task add -name 名称 -source 源目录 -dest 归档 [-algo none|lz77|huffman] [-config tasks.json]
+  backup task list [-config tasks.json]
+  backup task remove [-config tasks.json] <名称>
+  backup task run [-config tasks.json] [-password 口令] [-progress=false] <名称>
 
 -algo 默认 lz77，压完不比原样小就改存原样
 -password 不为空时加密归档，还原和校验要提供同一个口令
--progress 默认开启，把进度打到标准错误输出`
+-progress 默认开启，把进度打到标准错误输出
+任务文件默认是当前目录的 tasks.json，口令不存进去`
 
 var algorithms = map[string]backup.Algorithm{
 	"none":    backup.AlgorithmNone,
@@ -54,6 +59,8 @@ func run(ctx context.Context, args []string) error {
 		return runUnpack(ctx, args[1:])
 	case "verify":
 		return runVerify(ctx, args[1:])
+	case "task":
+		return runTask(ctx, args[1:])
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
