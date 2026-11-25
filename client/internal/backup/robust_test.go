@@ -220,6 +220,27 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	}
 }
 
+// 还原到一半出错时，这一次写出来的文件要清掉，只剩下一个空的 dst。
+// 否则用户面对的是一个既不像成功也不像失败的半截目录。
+func TestUnpackClearsPartialOutput(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a", "b"), "")
+	// 两条记录是父子关系，父的那条是文件：写 a 成功，接着建 a/b 就建不出来
+	archive := packTree(t, src, []Entry{
+		{Path: "a", Kind: KindFile},
+		{Path: "a/b", Kind: KindFile},
+	})
+
+	dst := t.TempDir()
+	err := Unpack(archive, dst)
+	if problem := errOn(err, "a/b", errs.ErrIO); problem != nil {
+		t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
+	}
+	if got := entryNames(t, dst); len(got) != 0 {
+		t.Errorf("Unpack(%q, %q) left %v in the target, want it empty", archive, dst, got)
+	}
+}
+
 // ---------- 辅助函数 ----------
 
 // checkArchiveOnlyHas 检查归档里只剩 want 这一个文件，并且整档校验通过：

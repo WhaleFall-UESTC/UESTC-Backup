@@ -327,7 +327,9 @@ func Verify(archive string) error {
 
 // Unpack 按记录顺序把归档还原到 dst，里面已经有东西就拒绝（errs.TargetNotEmpty）。
 // 动 dst 之前先经 Verify 核对，有问题一个文件都不写；路径非法或 Kind 不认识报 errs.Corrupted（路径是归档），
-// 写盘失败报 errs.IO（路径是那条记录）。符号链接跳过，中途出错不清理已经写出的文件。
+// 写盘失败报 errs.IO（路径是那条记录）。符号链接跳过。
+//
+// 中途出错时把这一次写出来的文件清掉，dst 本身留着（可能是调用方建的）；清理失败不改变返回的错误。
 func Unpack(archive, dst string) error {
 	if err := Verify(archive); err != nil {
 		return err
@@ -346,7 +348,7 @@ func Unpack(archive, dst string) error {
 	if err := a.readHeader(); err != nil {
 		return err
 	}
-	return a.each(func(rec Record) error {
+	err = a.each(func(rec Record) error {
 		if !filepath.IsLocal(rec.Path) {
 			return errs.Newf(errs.Corrupted, "path %q is not local", rec.Path).At(archive)
 		}
@@ -365,6 +367,25 @@ func Unpack(archive, dst string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		// dst 开始时是空的，里面的东西都是这次写的
+		_ = clearDir(dst)
+	}
+	return err
+}
+
+// clearDir 删掉 dir 里的所有东西，dir 本身留着。
+func clearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func prepareTarget(dst string) error {
