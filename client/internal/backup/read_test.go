@@ -2,6 +2,7 @@ package backup
 
 import (
 	"client/internal/errs"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -180,7 +181,7 @@ func TestVerifyAcceptsIntactArchive(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.bin"), string(dataBytes(150_000)))
 
 	for _, archive := range []string{packTree(t, root, scanOK(t, root)), packTree(t, root, nil)} {
-		if err := Verify(archive, ""); err != nil {
+		if err := Verify(context.Background(), archive, "", VerifyOptions{}); err != nil {
 			t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 		}
 	}
@@ -222,7 +223,7 @@ func TestVerifyRejectsBrokenArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			err := Verify(archive, "")
+			err := Verify(context.Background(), archive, "", VerifyOptions{})
 			if problem := errOn(err, tc.path, tc.want); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}
@@ -255,7 +256,7 @@ func TestVerifyRejectsTruncatedArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the truncated archive: %v", err)
 			}
 
-			err := Verify(archive, "")
+			err := Verify(context.Background(), archive, "", VerifyOptions{})
 			if problem := errOn(err, tc.path, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}

@@ -98,7 +98,7 @@ func TestPackContextCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries,
-			PackOptions{Progress: func(path string, _ int64) { cancel() }})
+			PackOptions{Progress: func(Progress) { cancel() }})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Pack() error = %v, want context.Canceled", err)
 		}
@@ -131,7 +131,7 @@ func TestPackProgressReportsBytes(t *testing.T) {
 	}
 	var got []report
 	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries,
-		PackOptions{Progress: func(path string, bytes int64) { got = append(got, report{path, bytes}) }})
+		PackOptions{Progress: func(p Progress) { got = append(got, report{p.Path, p.DoneBytes}) }})
 	if err != nil {
 		t.Fatalf("Pack() error = %v, want <nil>", err)
 	}
@@ -211,7 +211,7 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 		t.Errorf("Pack() over an existing archive: error = %v, want <nil>", err)
 	}
-	if err := Verify(dst, ""); err != nil {
+	if err := Verify(context.Background(), dst, "", VerifyOptions{}); err != nil {
 		t.Errorf("Verify(%q) = %v, want <nil>", dst, err)
 	}
 }
@@ -227,7 +227,7 @@ func checkArchiveOnlyHas(archive, want string) error {
 	if len(records) != 1 || records[0].Path != want {
 		return fmt.Errorf("ReadIndex() = %v, want only %q", records, want)
 	}
-	if err := Verify(archive, ""); err != nil {
+	if err := Verify(context.Background(), archive, "", VerifyOptions{}); err != nil {
 		return fmt.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 	}
 	return nil

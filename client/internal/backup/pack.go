@@ -16,14 +16,14 @@ import (
 type PackOptions struct {
 	Algorithm Algorithm
 	Password  string
-	Progress  func(path string, bytes int64)
+	Progress  func(Progress)
 }
 
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
 // Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样；
 // Password 不为空时再加密整份归档
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
-	if err := rejectInsideSource(dst, src); err != nil {
+	if err := CheckDestination(dst, src); err != nil {
 		return nil, err
 	}
 	if !opts.Algorithm.compressible() {
@@ -71,6 +71,7 @@ func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts P
 
 	keep := raw
 	if opts.Algorithm != AlgorithmNone {
+		emitPhase(opts.Progress, PhaseCompressing)
 		compressed := dst + ".cmp.tmp"
 		temps = append(temps, compressed)
 		size, err := compressFile(ctx, raw, compressed, opts.Algorithm)
@@ -83,6 +84,7 @@ func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts P
 		}
 	}
 	if opts.Password != "" {
+		emitPhase(opts.Progress, PhaseEncrypting)
 		encrypted := dst + ".enc.tmp"
 		temps = append(temps, encrypted)
 		if err := encryptFile(ctx, keep, encrypted, opts.Password); err != nil {
@@ -100,8 +102,8 @@ func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts P
 	return nil
 }
 
-// rejectInsideSource 拒绝把归档放进源目录，否则它会把自己也打进去。
-func rejectInsideSource(dst, src string) error {
+// CheckDestination 拒绝把归档放进源目录，否则它会把自己也打进去。
+func CheckDestination(dst, src string) error {
 	absSrc, err := filepath.Abs(src)
 	if err != nil {
 		return err
@@ -119,13 +121,15 @@ func rejectInsideSource(dst, src string) error {
 	}
 	return nil
 }
-func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []Entry, progress func(path string, bytes int64)) ([]Skip, error) {
+func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []Entry, progress func(Progress)) ([]Skip, error) {
 	if err := writeArchiveHeader(w, AlgorithmNone); err != nil {
 		return nil, err
 	}
 
+	totalFiles, totalBytes := countEntries(entries)
 	var skips []Skip
-	var written int64
+	var doneFiles int
+	var doneBytes int64
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -136,11 +140,15 @@ func writeArchive(ctx context.Context, w *archiveWriter, src string, entries []E
 		}
 		if skip != nil {
 			skips = append(skips, *skip)
+		}
+		if e.Kind != KindFile {
 			continue
 		}
-		if e.Kind == KindFile && progress != nil {
-			written += e.Size
-			progress(e.Path, written)
+		// 跳过的文件也算处理过，进度才能走到头
+		doneFiles++
+		doneBytes += e.Size
+		if progress != nil {
+			progress(Progress{Phase: PhasePacking, Path: e.Path, DoneFiles: doneFiles, TotalFiles: totalFiles, DoneBytes: doneBytes, TotalBytes: totalBytes})
 		}
 	}
 
