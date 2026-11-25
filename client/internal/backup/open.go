@@ -115,41 +115,21 @@ func decryptArchive(f *os.File, path, password string, h header) (*os.File, func
 		return nil, nil, err
 	}
 	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
-		return nil, nil, errs.New(errs.Corrupted).At(path)
+		return nil, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
 	}
 
 	key := aescbc.DeriveKey(password, h.enc.salt[:])
 	if verifier := aescbc.Verifier(key); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
 		return nil, nil, errs.New(errs.WrongPassword).At(path)
 	}
-
-	tmp, err := os.CreateTemp("", "dbkp-*")
-	if err != nil {
-		return nil, nil, err
+	transform := func(r io.Reader, w io.Writer) error {
+		err := aescbc.Decrypt(r, w, key, h.enc.iv[:])
+		if errors.Is(err, aescbc.ErrPadding) {
+			return errs.Wrap(err, errs.Corrupted)
+		}
+		return err
 	}
-	crc := crc64.New(crcTable)
-	crc.Write(h.raw[:archiveHeaderSize-crcSize])
-	crc.Write(zeroCRC[:])
-	crc.Write(h.encRaw)
-	err = aescbc.Decrypt(io.TeeReader(f, crc), tmp, key, h.enc.iv[:])
-	if err == nil && crc.Sum64() != h.crc {
-		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
-	}
-	if errors.Is(err, aescbc.ErrPadding) {
-		err = errs.Wrap(err, errs.Corrupted).At(path)
-	}
-	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
-	}
-	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, nil, err
-	}
-	return tmp, func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}, nil
+	return toTemp(h, h.encRaw, f, path, transform)
 }
 
 func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
@@ -165,7 +145,15 @@ func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), err
 	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
 		return nil, nil, err
 	}
+	transform := func(r io.Reader, w io.Writer) error {
+		return decompress(h.algorithm, r, w)
+	}
+	return toTemp(h, nil, f, path, transform)
+}
 
+// toTemp 把 r 经 transform 写进临时文件，同时核对存盘字节的 CRC64；
+// extra 是记录区之前、不属于公共头的字节（加密扩展头），校验时一并算进去
+func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
 	tmp, err := os.CreateTemp("", "dbkp-*")
 	if err != nil {
 		return nil, nil, err
@@ -173,10 +161,11 @@ func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), err
 	crc := crc64.New(crcTable)
 	crc.Write(h.raw[:archiveHeaderSize-crcSize])
 	crc.Write(zeroCRC[:])
-	src := io.TeeReader(f, crc)
-	err = decompress(h.algorithm, src, tmp)
+	crc.Write(extra)
+	src := io.TeeReader(r, crc)
+	err = transform(src, tmp)
 	if err == nil {
-		// 解压没读完的尾部也要算进校验值
+		// 变换没读完的尾部也要算进校验值
 		_, err = io.Copy(io.Discard, src)
 	}
 	if err == nil && crc.Sum64() != h.crc {
