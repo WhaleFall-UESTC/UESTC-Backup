@@ -7,11 +7,11 @@ description: "Go 代码规范审查：基于《腾讯 GO 语言编程指南》�
 
 # Go 代码规范审查（腾讯 GO 语言编程指南）
 
-基于《腾讯 GO 语言编程指南》对 Go 代码做**工具检查 + 规范深度审查**，输出结构化报告与修复清单。指南全文已拆解为本 skill 的 `chapters/`（26 章）与 `cheatsheet.md`（决策表 + 坏味道速查）。
+基于《腾讯 GO 语言编程指南》对 Go 代码做**工具检查 + 规范深度审查**，在对话里直接说明问题与修复清单，不生成文档。指南全文已拆解为本 skill 的 `chapters/`（26 章）与 `cheatsheet.md`（决策表 + 坏味道速查）。
 
 ## 审查工作流
 
-**0. 范围** → **1. 工具检查** → **2. 规范审查** → **3. 报告** → **4. Todo 清单**
+**0. 范围** → **1. 工具检查** → **2. 规范审查** → **3. 结论** → **4. Todo 清单**
 
 ### 步骤 0: 确定审查范围
 根据用户输入确定审查对象：
@@ -33,7 +33,7 @@ python3 scripts/go_check.py --repo server/     # 只查某个模块
 **跳过原则**：工具已覆盖的基础问题（格式、未使用变量、vet 警告）不再人工重复报告。
 
 **判别 vet/lint 失败的性质**（先于结论）：
-- **环境失败**：模块下载超时（网络不通时用 `GOPROXY=https://goproxy.cn,direct` 前缀重跑）、`//go:embed` 目录缺失（如 `frontend/dist` 未构建）、toolchain 版本缺失——这类记入报告"工具检查"表并注明原因，**不算代码问题**。
+- **环境失败**：模块下载超时（网络不通时用 `GOPROXY=https://goproxy.cn,direct` 前缀重跑）、`//go:embed` 目录缺失（如 `frontend/dist` 未构建）、toolchain 版本缺失——这类要在结论里注明原因，**不算代码问题**。
 - **代码失败**：vet 报的 `undefined`、`unreachable`、copylocks 等——进入审查结果。
 - gofmt 报"未格式化"若仅为 CRLF 行尾（Windows 常见），脚本已自动识别为行尾提示而非格式错误；根治办法是 `.gitattributes` 加 `*.go text eol=lf`。
 
@@ -56,8 +56,8 @@ python3 scripts/go_check.py --repo server/     # 只查某个模块
 
 **快速定位**：嫌疑代码的"看见就该改"清单见 [cheatsheet.md](cheatsheet.md) 的「坏味道速查」；给出修复方案时引用 [patterns.md](patterns.md) 对应模式。
 
-### 步骤 3: 生成报告
-使用 [assets/report-template.md](assets/report-template.md)，保存至 `docs/go-review-<范围>-<日期>.md`。严重程度：
+### 步骤 3: 输出结论
+问题直接写在对话里，不生成文档文件。严重程度：
 
 | 级别 | 说明 | 示例 |
 |------|------|-----|
@@ -130,7 +130,6 @@ python3 scripts/go_check.py --repo server/     # 只查某个模块
 - [patterns.md](patterns.md) — 修复建议引用的 14 个工程模式
 - [glossary.md](glossary.md) — 术语定义
 - [scripts/go_check.py](scripts/go_check.py) — gofmt/vet/golangci-lint 聚合工具
-- [assets/report-template.md](assets/report-template.md) — 审查报告模板
 - chapters/ — 指南 26 章详细规则（按需加载）
 
 ## Scope & Limits

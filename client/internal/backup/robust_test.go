@@ -98,7 +98,7 @@ func TestPackContextCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries,
-			PackOptions{Progress: func(path string, _ int64) { cancel() }})
+			PackOptions{Progress: func(_ string, _ int64) { cancel() }})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Pack() error = %v, want context.Canceled", err)
 		}

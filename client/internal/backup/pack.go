@@ -172,7 +172,7 @@ func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
 		if err != nil {
 			return &Skip{Path: e.Path, Err: errs.Wrap(err, errs.IO).At(e.Path)}, nil
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		in = f
 	}
 

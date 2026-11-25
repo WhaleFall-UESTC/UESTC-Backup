@@ -71,6 +71,7 @@ const (
 // Algorithm 是作用在存盘数据上的变换，取值写进公共头的 Algorithm 字段
 type Algorithm uint16
 
+// Algorithm 的取值，含义见文件开头的布局说明
 const (
 	AlgorithmNone    Algorithm = 0
 	AlgorithmHuffman Algorithm = 1

@@ -29,7 +29,7 @@ func sealArchive(ctx context.Context, raw, dst, password string, h encHeader) er
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.Create(dst)
 	if err != nil {
