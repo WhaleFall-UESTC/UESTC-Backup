@@ -88,6 +88,10 @@ func openArchive(path, password string) (*os.File, func(), error) {
 			cleanup()
 			return nil, nil, err
 		}
+		if h.algorithm == AlgorithmAES {
+			cleanup()
+			return nil, nil, errs.Newf(errs.UnsupportedVersion, "nested encryption").At(path)
+		}
 	}
 	if h.algorithm == AlgorithmNone {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
