@@ -1,0 +1,16 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+
+# gofmt 检查交给 wf 门禁做：Windows CRLF 检出会被 golangci 全量误报
+formatters:
+  default: none
