@@ -16,6 +16,7 @@ import (
 // Conflict 是还原时遇到已有路径的处理办法
 type Conflict uint8
 
+// Conflict 的取值
 const (
 	ConflictFail      Conflict = iota // 目标非空就拒绝，默认
 	ConflictOverwrite                 // 覆盖同名文件

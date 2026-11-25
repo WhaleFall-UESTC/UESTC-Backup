@@ -86,9 +86,10 @@ func runTaskList(args []string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "名称\t算法\t源目录\t归档")
+	// 写入的错误到 Flush 才报出来，这里不用逐个接
+	_, _ = fmt.Fprintln(w, "名称\t算法\t源目录\t归档")
 	for _, t := range list {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Algorithm, t.Source, t.Destination)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Algorithm, t.Source, t.Destination)
 	}
 	return w.Flush()
 }

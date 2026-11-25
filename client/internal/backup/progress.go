@@ -3,6 +3,7 @@ package backup
 // Phase 是进度事件所处的阶段
 type Phase uint8
 
+// Phase 的取值，顺序就是一次操作先后经过的阶段
 const (
 	PhasePacking Phase = iota
 	PhaseCompressing
