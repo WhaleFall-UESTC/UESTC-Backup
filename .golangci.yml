@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+
+# gofmt 检查由工作流独立步骤执行，避免 Windows CRLF 检出误报；v2 默认不启用任何 formatter

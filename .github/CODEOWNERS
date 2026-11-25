@@ -1,0 +1,7 @@
+# 默认兜底：未匹配到更具体规则的所有文件均由 @WhaleFall-UESTC 审查
+*                   @WhaleFall-UESTC
+
+# 后续多人协作时可按路径追加，越靠后优先级越高：
+# /client/            @teammate1
+# /client/frontend/   @teammate2
+# /server/            @teammate3
