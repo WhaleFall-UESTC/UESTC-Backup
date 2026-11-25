@@ -2,6 +2,7 @@ package backup
 
 import (
 	"bytes"
+	"client/internal/errs"
 	"context"
 	"errors"
 	"fmt"
@@ -9,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"client/internal/errs"
 )
 
 // 布局和各函数的约定见 archive.go。这里的布局常数故意再写一遍，
@@ -27,8 +26,14 @@ const (
 // packTree 把 root 下的 entries 打包到临时文件，返回归档路径。
 func packTree(t *testing.T, root string, entries []Entry) string {
 	t.Helper()
+	return packTreeAlgo(t, root, entries, AlgorithmNone)
+}
+
+// packTreeAlgo 同上，用 algo 指定的算法。
+func packTreeAlgo(t *testing.T, root string, entries []Entry, algo Algorithm) string {
+	t.Helper()
 	archive := filepath.Join(t.TempDir(), "backup.dbkp")
-	if _, err := Pack(context.Background(), archive, root, entries, PackOptions{}); err != nil {
+	if _, err := Pack(context.Background(), archive, root, entries, PackOptions{Algorithm: algo}); err != nil {
 		t.Fatalf("Setup failed: Pack() error = %v", err)
 	}
 	return archive
@@ -37,7 +42,13 @@ func packTree(t *testing.T, root string, entries []Entry) string {
 // packBytes 打包后把归档整个读回来。
 func packBytes(t *testing.T, root string, entries []Entry) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(packTree(t, root, entries))
+	return packBytesAlgo(t, root, entries, AlgorithmNone)
+}
+
+// packBytesAlgo 同上，用 algo 指定的算法。
+func packBytesAlgo(t *testing.T, root string, entries []Entry, algo Algorithm) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(packTreeAlgo(t, root, entries, algo))
 	if err != nil {
 		t.Fatalf("Setup failed: read the archive: %v", err)
 	}
