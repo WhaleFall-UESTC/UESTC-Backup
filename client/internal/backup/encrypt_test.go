@@ -271,6 +271,28 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 	}
 }
 
+// 加密归档里面再套一层加密，读的时候按不支持拒绝，不能落到“算法不认识”上
+func TestNestedEncryptionIsRejected(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "内容")
+	inner := packTreeEnc(t, root, scanOK(t, root), AlgorithmNone, "pw")
+
+	var h encHeader
+	copy(h.salt[:], frozenSalt())
+	copy(h.iv[:], frozenIV())
+	outer := filepath.Join(t.TempDir(), "nested.dbkp")
+	if err := sealArchive(context.Background(), inner, outer, "pw", h); err != nil {
+		t.Fatalf("Setup failed: sealArchive() error = %v", err)
+	}
+
+	if err := Verify(outer, "pw"); !errors.Is(err, errs.ErrUnsupportedVersion) {
+		t.Errorf("Verify() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
+	}
+	if err := Unpack(outer, t.TempDir(), "pw"); !errors.Is(err, errs.ErrUnsupportedVersion) {
+		t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrUnsupportedVersion)", err)
+	}
+}
+
 // 先加密再压缩没有意义：密文没有冗余，压缩算法压不动，比先压缩再加密大得多
 func TestEncryptThenCompressDoesNotShrink(t *testing.T) {
 	root := t.TempDir()
