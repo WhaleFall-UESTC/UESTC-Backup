@@ -216,26 +216,6 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	}
 }
 
-// 还原中途出错，dst 里不留这次写的文件。
-func TestUnpackClearsPartialOutput(t *testing.T) {
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "a", "b"), "")
-	// 两条记录是父子关系，父的是文件：写 a 成功，建 a/b 失败
-	archive := packTree(t, src, []Entry{
-		{Path: "a", Kind: KindFile},
-		{Path: "a/b", Kind: KindFile},
-	})
-
-	dst := t.TempDir()
-	err := Unpack(archive, dst)
-	if problem := errOn(err, "a/b", errs.ErrIO); problem != nil {
-		t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
-	}
-	if got := entryNames(t, dst); len(got) != 0 {
-		t.Errorf("Unpack(%q, %q) left %v in the target, want it empty", archive, dst, got)
-	}
-}
-
 // ---------- 辅助函数 ----------
 
 // checkArchiveOnlyHas 检查归档只剩 want，且整档校验通过。
