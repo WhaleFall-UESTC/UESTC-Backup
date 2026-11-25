@@ -22,7 +22,7 @@
 
 - **🔍 深度代码分析**：识别安全漏洞、并发问题、潜在 Bug、架构设计问题
 - **📊 多维度审查**：并发安全、安全性、性能、编程规范、资源管理、框架专项
-- **📝 专业报告生成**：基于模板生成结构化的 Code Review 报告
+- **💬 结论直接输出**：问题直接在对话里说明，不生成文档
 - **🔧 智能 Lint 集成**：自动检测并执行项目的 Lint 工具
 - **📦 需求符合性分析**：对比需求文档，验证功能实现完整性
 - **🔀 多 VCS 支持**：同时支持 **Git** 和 **SVN**，自动检测当前项目的版本控制系统
@@ -80,7 +80,7 @@ python3 scripts/sync_standards.py --all
 Code Review Skill 遵循以下 7 步工作流程：
 
 ```
-配置读取 → 需求收集 → 代码变更分析 → Lint检查 → 架构分析 → 深度审查 → 报告生成 → Todo清单
+配置读取 → 需求收集 → 代码变更分析 → Lint检查 → 架构分析 → 深度审查 → 输出结论 → Todo清单
 ```
 
 ### 步骤详解
@@ -91,7 +91,6 @@ Code Review Skill 遵循以下 7 步工作流程：
 - 排除特定文件/目录
 - 忽略特定审查类别或规则
 - 设置审查严格程度
-- 自定义报告输出路径
 
 #### 1️⃣ 需求收集
 
@@ -141,7 +140,7 @@ python3 scripts/lint_check.py -l java --repo /path/to/project
 
 #### 4️⃣ 架构分析
 
-生成规格文档 `docs/spec-<功能名称>-<日期>.md`，包含：
+在对话里说明架构，不生成文档：
 - 架构概览
 - 数据流分析
 - 关键组件说明
@@ -169,17 +168,9 @@ python3 scripts/lint_check.py -l java --repo /path/to/project
 - ⚠️ **重要**：性能问题、质量问题（建议修复）
 - 💡 **建议**：代码风格、最佳实践（可选优化）
 
-#### 6️⃣ 报告生成
+#### 6️⃣ 输出结论
 
-使用 `assets/report-template.md` 模板生成报告，保存至 `docs/code-review-<功能名称>-<日期>.md`。
-
-报告包含：
-- 基本信息和审查范围
-- 需求符合性分析
-- 代码质量与复杂度
-- 深度审查结果（按严重程度分类）
-- 专项评估（安全、性能）
-- 总结评分
+问题直接写在对话里，不生成文档文件。结论包括需求符合性、按严重程度分类的问题和专项评估。
 
 #### 7️⃣ Todo 清单
 
@@ -241,9 +232,6 @@ quality_thresholds:
   function_lines: 80
   file_lines: 800
   nesting_depth: 4
-
-# 报告输出配置
-output: code-review/CR-${requirement}-${date}.md
 
 # 自定义编程规范文档路径
 coding_standards:
@@ -555,10 +543,7 @@ coding_standards:
 
 ### Q5: 审查报告保存在哪里？
 
-默认保存在 `docs/code-review-<功能名称>-<日期>.md`，可通过配置自定义：
-```yaml
-output: code-review/CR-${requirement}-${date}.md
-```
+不保存。结论直接输出在对话里，不生成文档文件。
 
 ### Q6: 如何审查 go-zero 项目？
 
@@ -599,8 +584,7 @@ skills/code-review/
 ├── .gitignore                        # Git 忽略规则
 ├── assets/                           # 资源文件
 │   ├── .codereview.example          # 配置示例
-│   ├── .golangci.yml                # Go Lint 默认配置
-│   └── report-template.md           # 报告模板
+│   └── .golangci.yml                # Go Lint 默认配置
 ├── references/                       # 编码标准参考
 │   └── coding-standards/
 │       ├── go/                      # Go 标准（内置）
