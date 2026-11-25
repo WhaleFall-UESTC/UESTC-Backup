@@ -58,8 +58,9 @@ const (
 	recordHeaderSize     = 40
 	archiveAlignment     = int64(512)
 
+	aesBlockSize    = 16
 	aesSaltSize     = 16
-	aesIVSize       = 16
+	aesIVSize       = aesBlockSize
 	aesVerifierSize = 32
 
 	crcFieldOffset = 32 // 记录头里 CRC64 的偏移

@@ -52,7 +52,7 @@ func TestReadIndexRejectsNonArchive(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "x.dbkp")
 			writeFile(t, archive, tc.content)
 
-			_, err := ReadIndex(archive)
+			_, err := ReadIndex(archive, "")
 			if problem := errOn(err, archive, errs.ErrNotArchive); problem != nil {
 				t.Errorf("ReadIndex(%q): %v", archive, problem)
 			}
@@ -63,7 +63,7 @@ func TestReadIndexRejectsNonArchive(t *testing.T) {
 	t.Run("魔数不对，其余和空归档一样", func(t *testing.T) {
 		archive := rewrittenArchive(t, func(raw []byte) { raw[0] = 'X' })
 
-		_, err := ReadIndex(archive)
+		_, err := ReadIndex(archive, "")
 		if problem := errOn(err, archive, errs.ErrNotArchive); problem != nil {
 			t.Errorf("ReadIndex(%q): %v", archive, problem)
 		}
@@ -72,7 +72,7 @@ func TestReadIndexRejectsNonArchive(t *testing.T) {
 	t.Run("文件不存在", func(t *testing.T) {
 		// 错误原样返回，底层的 fs.ErrNotExist 要还在
 		archive := filepath.Join(t.TempDir(), "nope.dbkp")
-		if _, err := ReadIndex(archive); !errors.Is(err, fs.ErrNotExist) {
+		if _, err := ReadIndex(archive, ""); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("ReadIndex(%q) error = %v, want errors.Is(err, fs.ErrNotExist)", archive, err)
 		}
 	})
@@ -82,7 +82,7 @@ func TestReadIndexRejectsNonArchive(t *testing.T) {
 func TestReadIndexRejectsUnknownVersion(t *testing.T) {
 	archive := rewrittenArchive(t, func(raw []byte) { raw[layoutVersionOffset] = 99 })
 
-	_, err := ReadIndex(archive)
+	_, err := ReadIndex(archive, "")
 	if problem := errOn(err, archive, errs.ErrUnsupportedVersion); problem != nil {
 		t.Errorf("ReadIndex(%q): %v", archive, problem)
 	}
@@ -110,7 +110,7 @@ func TestReadIndexRejectsTruncatedArchive(t *testing.T) {
 			t.Fatalf("Setup failed: write an archive of %d bytes: %v", n, err)
 		}
 
-		_, err := ReadIndex(archive)
+		_, err := ReadIndex(archive, "")
 		if problem := errOn(err, archive, want); problem != nil {
 			t.Errorf("ReadIndex() on the first %d bytes: %v", n, problem)
 			continue
@@ -146,7 +146,7 @@ func TestReadIndexRejectsInvalidRecordHeader(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			_, err := ReadIndex(archive)
+			_, err := ReadIndex(archive, "")
 			if problem := errOn(err, archive, errs.ErrCorrupted); problem != nil {
 				t.Errorf("ReadIndex(%q): %v", archive, problem)
 			}
@@ -167,7 +167,7 @@ func TestReadIndexRejectsBadDataOffset(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			archive := rewrittenArchive(t, func(raw []byte) { copy(raw[layoutDataOffset:], tc.offset) })
 
-			_, err := ReadIndex(archive)
+			_, err := ReadIndex(archive, "")
 			if problem := errOn(err, archive, errs.ErrCorrupted); problem != nil {
 				t.Errorf("ReadIndex(%q): %v", archive, problem)
 			}
@@ -180,7 +180,7 @@ func TestVerifyAcceptsIntactArchive(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.bin"), string(dataBytes(150_000)))
 
 	for _, archive := range []string{packTree(t, root, scanOK(t, root)), packTree(t, root, nil)} {
-		if err := Verify(archive); err != nil {
+		if err := Verify(archive, ""); err != nil {
 			t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 		}
 	}
@@ -222,7 +222,7 @@ func TestVerifyRejectsBrokenArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			err := Verify(archive)
+			err := Verify(archive, "")
 			if problem := errOn(err, tc.path, tc.want); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}
@@ -255,7 +255,7 @@ func TestVerifyRejectsTruncatedArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the truncated archive: %v", err)
 			}
 
-			err := Verify(archive)
+			err := Verify(archive, "")
 			if problem := errOn(err, tc.path, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}

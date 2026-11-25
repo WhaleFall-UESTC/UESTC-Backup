@@ -3,13 +3,16 @@ package backup
 import (
 	"bytes"
 	"client/internal/aescbc"
+	"client/internal/errs"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/crc64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -141,7 +144,84 @@ func TestEncryptedHeaderIsFrozen(t *testing.T) {
 	}
 }
 
+// 加密归档走公开接口读索引、校验、还原，结果和源目录一致；不给口令的未加密归档照旧能用
+func TestEncryptedArchiveRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "readme.txt"), strings.Repeat("备份要能还原回来，加密只是最后一步。\n", 300))
+	writeFile(t, filepath.Join(root, "empty.txt"), "")
+	writeFile(t, filepath.Join(root, "文档 目录", "测试 文件.txt"), "内容")
+	if err := os.MkdirAll(filepath.Join(root, "empty dir"), 0o755); err != nil {
+		t.Fatalf("Setup failed: create an empty directory: %v", err)
+	}
+	entries := scanOK(t, root)
+	const password = "口令 pw"
+
+	for _, algo := range []Algorithm{AlgorithmNone, AlgorithmHuffman, AlgorithmLZ77} {
+		t.Run(fmt.Sprintf("algo %d", algo), func(t *testing.T) {
+			archive := packTreeEnc(t, root, entries, algo, password)
+			if diff := diffRecords(readIndexOKPassword(t, archive, password), entries); diff != nil {
+				t.Errorf("ReadIndex() %v", diff)
+			}
+			if err := Verify(archive, password); err != nil {
+				t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
+			}
+
+			dst := filepath.Join(t.TempDir(), "restore")
+			if err := Unpack(archive, dst, password); err != nil {
+				t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
+			}
+			if problem := diffTree(root, dst); problem != nil {
+				t.Errorf("Unpack(%q, %q): the restored tree differs from the source: %v", archive, dst, problem)
+			}
+		})
+	}
+
+	t.Run("未加密的归档不用给口令", func(t *testing.T) {
+		archive := packTree(t, root, entries)
+		if err := Verify(archive, password); err != nil {
+			t.Errorf("Verify(%q) with a password on an unencrypted archive = %v, want <nil>", archive, err)
+		}
+	})
+}
+
+// 口令不对时读索引、校验、还原都报 errs.WrongPassword，还原的目标目录里一个文件都不写
+func TestEncryptedArchiveRejectsWrongPassword(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), strings.Repeat("内容", 100))
+	archive := packTreeEnc(t, root, scanOK(t, root), AlgorithmLZ77, "right")
+
+	for _, password := range []string{"wrong", ""} {
+		t.Run(fmt.Sprintf("口令 %q", password), func(t *testing.T) {
+			if _, err := ReadIndex(archive, password); !errors.Is(err, errs.ErrWrongPassword) {
+				t.Errorf("ReadIndex() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
+			}
+			if err := Verify(archive, password); !errors.Is(err, errs.ErrWrongPassword) {
+				t.Errorf("Verify() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
+			}
+
+			dst := t.TempDir()
+			err := Unpack(archive, dst, password)
+			if !errors.Is(err, errs.ErrWrongPassword) {
+				t.Errorf("Unpack() error = %v, want errors.Is(err, errs.ErrWrongPassword)", err)
+			}
+			if got := entryNames(t, dst); len(got) != 0 {
+				t.Errorf("Unpack() left %v in the target, want nothing written without the right password", got)
+			}
+		})
+	}
+}
+
 // ---------- 辅助函数 ----------
+
+// readIndexOKPassword 执行 ReadIndex，出错时让测试立即失败
+func readIndexOKPassword(t *testing.T, archive, password string) []Record {
+	t.Helper()
+	records, err := ReadIndex(archive, password)
+	if err != nil {
+		t.Fatalf("Setup failed: ReadIndex(%q) error = %v", archive, err)
+	}
+	return records
+}
 
 // packTreeEnc 用 algo 压缩、password 加密，打包 root 下的 entries
 func packTreeEnc(t *testing.T, root string, entries []Entry, algo Algorithm, password string) string {

@@ -43,12 +43,12 @@ func TestPackCompressedArchiveRoundTrip(t *testing.T) {
 			if diff := diffRecords(readIndexOK(t, archive), entries); diff != nil {
 				t.Errorf("ReadIndex() %v", diff)
 			}
-			if err := Verify(archive); err != nil {
+			if err := Verify(archive, ""); err != nil {
 				t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 			}
 
 			dst := filepath.Join(t.TempDir(), "restore")
-			if err := Unpack(archive, dst); err != nil {
+			if err := Unpack(archive, dst, ""); err != nil {
 				t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 			}
 			if problem := diffTree(root, dst); problem != nil {
@@ -97,11 +97,11 @@ func TestPackCompressedArchiveDoesNotGrow(t *testing.T) {
 		t.Errorf("Pack() with algo %d wrote %d bytes, want no more than the %d bytes of an uncompressed archive",
 			AlgorithmLZ77, size, limit)
 	}
-	if err := Verify(archive); err != nil {
+	if err := Verify(archive, ""); err != nil {
 		t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 	}
 	dst := filepath.Join(t.TempDir(), "restore")
-	if err := Unpack(archive, dst); err != nil {
+	if err := Unpack(archive, dst, ""); err != nil {
 		t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 	}
 	if problem := diffTree(root, dst); problem != nil {
@@ -149,12 +149,12 @@ func TestCompressedArchiveDamageIsDetected(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			if err := Verify(archive); !errors.Is(err, tc.want) {
+			if err := Verify(archive, ""); !errors.Is(err, tc.want) {
 				t.Errorf("Verify(%q) error = %v, want errors.Is(err, %v)", archive, err, tc.want)
 			}
 
 			dst := t.TempDir()
-			if err := Unpack(archive, dst); !errors.Is(err, tc.want) {
+			if err := Unpack(archive, dst, ""); !errors.Is(err, tc.want) {
 				t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, %v)", archive, dst, err, tc.want)
 			}
 			if got := entryNames(t, dst); len(got) != 0 {
