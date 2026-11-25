@@ -16,7 +16,7 @@ import (
 
 const usage = `用法:
   backup pack [-algo none|lz77|huffman] [-password 口令] [-progress=false] <源目录> <归档>
-  backup unpack [-password 口令] [-progress=false] <归档> <目标目录>
+  backup unpack [-password 口令] [-progress=false] [-on-conflict fail|overwrite|skip|rename] <归档> <目标目录>
   backup verify [-password 口令] [-progress=false] <归档>
   backup task add -name 名称 -source 源目录 -dest 归档 [-algo none|lz77|huffman] [-config tasks.json]
   backup task list [-config tasks.json]
@@ -26,7 +26,15 @@ const usage = `用法:
 -algo 默认 lz77，压完不比原样小就改存原样
 -password 不为空时加密归档，还原和校验要提供同一个口令
 -progress 默认开启，把进度打到标准错误输出
+-on-conflict 默认 fail，目标目录非空就拒绝
 任务文件默认是当前目录的 tasks.json，口令不存进去`
+
+var conflicts = map[string]backup.Conflict{
+	"fail":      backup.ConflictFail,
+	"overwrite": backup.ConflictOverwrite,
+	"skip":      backup.ConflictSkip,
+	"rename":    backup.ConflictRename,
+}
 
 var algorithms = map[string]backup.Algorithm{
 	"none":    backup.AlgorithmNone,
@@ -111,6 +119,7 @@ func runPack(ctx context.Context, args []string) error {
 
 func runUnpack(ctx context.Context, args []string) error {
 	c := newCommonFlags("unpack")
+	conflictName := c.fs.String("on-conflict", "fail", "遇到已有文件的处理：fail、overwrite、skip、rename")
 	if err := c.parse(args); errors.Is(err, flag.ErrHelp) {
 		return nil
 	} else if err != nil {
@@ -119,11 +128,17 @@ func runUnpack(ctx context.Context, args []string) error {
 	if c.fs.NArg() != 2 {
 		return usageErr("unpack 需要两个参数：<归档> <目标目录>")
 	}
-	opts := backup.UnpackOptions{Progress: progressPrinter(c.progress)}
-	if err := backup.Unpack(ctx, c.fs.Arg(0), c.fs.Arg(1), c.password, opts); err != nil {
+	conflict, ok := conflicts[*conflictName]
+	if !ok {
+		return usageErr("未知冲突策略 %q", *conflictName)
+	}
+
+	opts := backup.UnpackOptions{Conflict: conflict, Progress: progressPrinter(c.progress)}
+	result, err := backup.Unpack(ctx, c.fs.Arg(0), c.fs.Arg(1), c.password, opts)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("已还原到 %s\n", c.fs.Arg(1))
+	fmt.Printf("已还原 %d 个文件到 %s，跳过 %d 个，改名 %d 个\n", result.Restored, c.fs.Arg(1), result.Skipped, result.Renamed)
 	return nil
 }
 

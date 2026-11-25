@@ -48,7 +48,7 @@ func TestPackCompressedArchiveRoundTrip(t *testing.T) {
 			}
 
 			dst := filepath.Join(t.TempDir(), "restore")
-			if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
+			if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
 				t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 			}
 			if problem := diffTree(root, dst); problem != nil {
@@ -101,7 +101,7 @@ func TestPackCompressedArchiveDoesNotGrow(t *testing.T) {
 		t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 	}
 	dst := filepath.Join(t.TempDir(), "restore")
-	if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
+	if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
 		t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 	}
 	if problem := diffTree(root, dst); problem != nil {
@@ -154,7 +154,7 @@ func TestCompressedArchiveDamageIsDetected(t *testing.T) {
 			}
 
 			dst := t.TempDir()
-			if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); !errors.Is(err, tc.want) {
+			if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); !errors.Is(err, tc.want) {
 				t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, %v)", archive, dst, err, tc.want)
 			}
 			if got := entryNames(t, dst); len(got) != 0 {

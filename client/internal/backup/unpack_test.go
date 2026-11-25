@@ -35,7 +35,7 @@ func TestUnpackRestoresTree(t *testing.T) {
 
 	restoresTo := func(t *testing.T, dst string) {
 		t.Helper()
-		if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
+		if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
 			t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 		}
 		if problem := diffTree(root, dst); problem != nil {
@@ -53,7 +53,7 @@ func TestUnpackRestoresTree(t *testing.T) {
 		archive := packTree(t, t.TempDir(), nil)
 		dst := filepath.Join(t.TempDir(), "restore")
 
-		if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
+		if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
 			t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 		}
 		if _, err := os.Stat(dst); err != nil {
@@ -89,7 +89,7 @@ func TestUnpackRejectsNonEmptyTarget(t *testing.T) {
 			tc.fill(t, dst)
 			before := entryNames(t, dst)
 
-			err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 			if problem := errOn(err, dst, errs.ErrTargetNotEmpty); problem != nil {
 				t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
 			}
@@ -107,7 +107,7 @@ func TestUnpackRejectsFileTarget(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "file.txt")
 	writeFile(t, dst, "keep")
 
-	err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+	_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 	var e *errs.Error
 	if err == nil || errors.As(err, &e) {
 		t.Errorf("Unpack(%q, %q) error = %v, want the error from creating the target, returned as is",
@@ -123,7 +123,7 @@ func TestUnpackRejectsMissingArchive(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "nope.dbkp")
 	dst := filepath.Join(t.TempDir(), "restore")
 
-	err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+	_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, fs.ErrNotExist)", archive, dst, err)
 	}
@@ -168,7 +168,7 @@ func TestUnpackRejectsTruncatedArchive(t *testing.T) {
 			}
 
 			dst := t.TempDir()
-			err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 			if problem := errOn(err, tc.path, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
 			}
@@ -219,7 +219,7 @@ func TestUnpackRejectsCorruptedArchive(t *testing.T) {
 			}
 
 			dst := t.TempDir()
-			err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 			if problem := errOn(err, tc.path, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
 			}
@@ -249,7 +249,7 @@ func TestUnpackRejectsEscapingPath(t *testing.T) {
 			outside := filepath.Dir(dst)
 			before := entryNames(t, outside)
 
-			err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 			if problem := errOn(err, archive, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
 			}
@@ -267,7 +267,7 @@ func TestUnpackRejectsEscapingPath(t *testing.T) {
 func TestUnpackRejectsUnknownKind(t *testing.T) {
 	archive := packTree(t, t.TempDir(), []Entry{{Path: "odd", Kind: Kind(9)}})
 
-	err := Unpack(context.Background(), archive, t.TempDir(), "", UnpackOptions{})
+	_, err := Unpack(context.Background(), archive, t.TempDir(), "", UnpackOptions{})
 	if problem := errOn(err, archive, errs.ErrCorrupted); problem != nil {
 		t.Errorf("Unpack(%q): %v", archive, problem)
 	}
@@ -283,7 +283,7 @@ func TestUnpackSkipsSymlinks(t *testing.T) {
 	})
 	dst := t.TempDir()
 
-	if err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
+	if _, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{}); err != nil {
 		t.Fatalf("Unpack(%q, %q) error = %v", archive, dst, err)
 	}
 	want := []string{"a.txt"} // 符号链接不在里面
@@ -314,7 +314,7 @@ func TestUnpackReportsUnwritableEntry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			archive := packTree(t, src, []Entry{parent, tc.child})
 
-			err := Unpack(context.Background(), archive, t.TempDir(), "", UnpackOptions{})
+			_, err := Unpack(context.Background(), archive, t.TempDir(), "", UnpackOptions{})
 			if problem := errOn(err, tc.child.Path, errs.ErrIO); problem != nil {
 				t.Errorf("Unpack(%q): %v", archive, problem)
 			}
@@ -335,7 +335,7 @@ func TestUnpackClearsPartialOutput(t *testing.T) {
 	})
 
 	dst := t.TempDir()
-	err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+	_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
 	if problem := errOn(err, "a/b", errs.ErrIO); problem != nil {
 		t.Errorf("Unpack(%q, %q): %v", archive, dst, problem)
 	}
