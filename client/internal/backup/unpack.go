@@ -10,18 +10,21 @@ import (
 
 // Unpack 把归档还原到 dst；dst 非空就拒绝，中途出错清掉这次写的文件。
 func Unpack(archive, dst string) error {
-	if err := Verify(archive); err != nil {
+	f, cleanup, err := openArchive(archive)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if err := verifyArchive(archive, f); err != nil {
 		return err
 	}
 	if err := prepareTarget(dst); err != nil {
 		return err
 	}
-
-	f, err := os.Open(archive)
-	if err != nil {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	defer f.Close()
 
 	a := &archiveReader{path: archive, f: f}
 	if err := a.readHeader(); err != nil {

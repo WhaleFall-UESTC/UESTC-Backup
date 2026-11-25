@@ -16,9 +16,13 @@ type Record struct {
 //	  偏移  宽度  字段         取值
 //	     0     4  Magic        "DBKP"
 //	     4     2  Version      1
-//	     6     2  Algorithm    0 = 不压缩不加密
+//	     6     2  Algorithm    0 不压缩 / 1 Huffman / 2 LZ77
 //	     8     8  DataOffset   记录区的起始偏移，恒为 24
 //	    16     8  CRC64        整份归档的校验值
+//
+//	Algorithm 为 0 时，公共头后面直接是记录。为 1、2 时，后面是压过的整个归档：
+//	解开得到一份完整的、Algorithm 为 0 的 .dbkp。压缩不比原样小就改存原样，
+//	Algorithm 仍是 0。
 //
 //	记录，一条接一条，顺序同打包时的 entries
 //	  偏移  宽度  字段         取值
@@ -33,12 +37,11 @@ type Record struct {
 //	    40   PathLen Path         UTF-8，只用 '/' 分隔
 //	  40+PathLen      数据区        仅普通文件：Size 字节内容，补零到 512 的整数倍
 //
-// 两个 CRC64 都是 CRC-64/ECMA。公共头的 CRC64 覆盖整个归档，
+// 两个 CRC64 都是 CRC-64/ECMA。公共头的 CRC64 覆盖存盘的那份字节，
 // 但各处的 CRC64 字段本身按 0 计入。
 const (
 	archiveMagic      = "DBKP"
 	archiveVersion    = uint16(1)
-	archiveAlgorithm  = uint16(0)
 	archiveHeaderSize = int64(24)
 	recordHeaderSize  = 40
 	archiveAlignment  = int64(512)
@@ -47,6 +50,19 @@ const (
 	crcSize        = 8
 	maxPathBytes   = 1 << 20
 )
+
+// Algorithm 是压缩算法，取值写进公共头的 Algorithm 字段
+type Algorithm uint16
+
+const (
+	AlgorithmNone    Algorithm = 0
+	AlgorithmHuffman Algorithm = 1
+	AlgorithmLZ77    Algorithm = 2
+)
+
+func (a Algorithm) known() bool {
+	return a == AlgorithmNone || a == AlgorithmHuffman || a == AlgorithmLZ77
+}
 
 var (
 	crcTable = crc64.MakeTable(crc64.ECMA)

@@ -13,13 +13,13 @@ import (
 	"client/internal/errs"
 )
 
-// ReadIndex 读出归档里的全部记录，顺序同打包时。它只跳过数据区，不校验任何内容。
+// ReadIndex 读出归档里的全部记录，顺序同打包时。它只跳过数据区，不校验记录内容
 func ReadIndex(archive string) ([]Record, error) {
-	f, err := os.Open(archive)
+	f, cleanup, err := openArchive(archive)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer cleanup()
 
 	a := &archiveReader{path: archive, f: f}
 	err = a.readHeader()
@@ -45,14 +45,16 @@ func ReadIndex(archive string) ([]Record, error) {
 // 有问题时返回 errs.Corrupted，路径是出问题的文件，看不出是哪个文件时是 archive。
 // 归档不完整时 Err 是 io.ErrUnexpectedEOF；文件打不开时错误原样返回。
 func Verify(archive string) error {
-	f, err := os.Open(archive)
+	f, cleanup, err := openArchive(archive)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	a := &archiveReader{path: archive, f: f, sum: crc64.New(crcTable)}
-	err = a.readHeader()
+	defer cleanup()
+	return verifyArchive(archive, f)
+}
+func verifyArchive(path string, f *os.File) error {
+	a := &archiveReader{path: path, f: f, sum: crc64.New(crcTable)}
+	err := a.readHeader()
 	if err == nil {
 		err = a.each(func(rec Record) error {
 			if rec.Kind != KindFile {
@@ -62,7 +64,7 @@ func Verify(archive string) error {
 		})
 	}
 	if err == nil && a.sum.Sum64() != a.crc {
-		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(archive)
+		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
 	}
 	return err
 }
@@ -86,34 +88,24 @@ func incomplete(err error, format string, args ...any) *errs.Error {
 
 // readHeader 读公共头，把文件位置移到第一条记录。
 func (a *archiveReader) readHeader() error {
-	var magic [4]byte
-	if _, err := io.ReadFull(a.f, magic[:]); err != nil || string(magic[:]) != archiveMagic {
-		return errs.New(errs.NotArchive).At(a.path)
+	h, err := readHeader(a.f, a.path)
+	if err != nil {
+		return err
 	}
-
-	var rest [archiveHeaderSize - 4]byte
-	if _, err := io.ReadFull(a.f, rest[:]); err != nil {
-		return incomplete(err, "header is incomplete").At(a.path)
-	}
-	if version := binary.LittleEndian.Uint16(rest[0:2]); version != archiveVersion {
-		return errs.Newf(errs.UnsupportedVersion, "version %d", version).At(a.path)
+	if a.sum != nil {
+		a.sum.Write(h.raw[:archiveHeaderSize-crcSize])
+		a.sum.Write(zeroCRC[:])
 	}
 	info, err := a.f.Stat()
 	if err != nil {
 		return err
 	}
-	dataOffset := int64(binary.LittleEndian.Uint64(rest[4:12]))
-	if dataOffset < archiveHeaderSize || dataOffset > info.Size() {
-		return errs.Newf(errs.Corrupted, "data offset %d", dataOffset).At(a.path)
+	if h.dataOffset < archiveHeaderSize || h.dataOffset > info.Size() {
+		return errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(a.path)
 	}
 
-	a.crc = binary.LittleEndian.Uint64(rest[12:20])
-	if a.sum != nil {
-		a.sum.Write(magic[:])
-		a.sum.Write(rest[:12])
-		a.sum.Write(zeroCRC[:])
-	}
-	_, err = a.f.Seek(dataOffset, io.SeekStart)
+	a.crc = h.crc
+	_, err = a.f.Seek(h.dataOffset, io.SeekStart)
 	return err
 }
 

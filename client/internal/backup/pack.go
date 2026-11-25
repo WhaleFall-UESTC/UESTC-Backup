@@ -97,7 +97,7 @@ func writeArchiveHeader(w io.Writer) error {
 
 	copy(header[0:4], archiveMagic)
 	binary.LittleEndian.PutUint16(header[4:6], archiveVersion)
-	binary.LittleEndian.PutUint16(header[6:8], archiveAlgorithm)
+	binary.LittleEndian.PutUint16(header[6:8], uint16(AlgorithmNone))
 	binary.LittleEndian.PutUint64(header[8:16], uint64(archiveHeaderSize))
 
 	_, err := w.Write(header)
