@@ -19,7 +19,7 @@ type header struct {
 	crc        uint64
 	raw        []byte // 读到的 24 个字节
 	enc        encHeader
-	encRaw     []byte // 读到的 64 个字节
+	encRaw     []byte // 读到的整个加密扩展头
 }
 
 // readHeader 读公共头并校验魔数、版本和算法；加密归档连扩展头一起读
@@ -59,13 +59,15 @@ func (h *header) readEnc(r io.Reader, path string) error {
 	if h.dataOffset != archiveEncDataOffset {
 		return errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
 	}
-	copy(h.enc.salt[:], h.encRaw[0:aesSaltSize])
-	copy(h.enc.iv[:], h.encRaw[aesSaltSize:aesSaltSize+aesIVSize])
-	copy(h.enc.verifier[:], h.encRaw[aesSaltSize+aesIVSize:archiveEncHeaderSize])
+	copy(h.enc.salt[:], h.encRaw[encSaltOffset:])
+	copy(h.enc.iv[:], h.encRaw[encIVOffset:])
+	h.enc.iterations = binary.LittleEndian.Uint32(h.encRaw[encIterOffset:])
+	copy(h.enc.verifier[:], h.encRaw[encVerifierOffset:])
+	copy(h.enc.mac[:], h.encRaw[encMACOffset:])
 	return nil
 }
 
-// openArchive 打开归档，按需解密、解压到临时文件，返回位置在开头的内层 .dbkp。
+// openArchive 打开归档，按需解密、解压到暂存目录，返回位置在开头的内层 .dbkp。
 // password 在未加密的归档上被忽略；调用方必须调用返回的 cleanup
 func openArchive(path, password string) (*os.File, func(), error) {
 	f, err := os.Open(path)
@@ -77,14 +79,26 @@ func openArchive(path, password string) (*os.File, func(), error) {
 		_ = f.Close()
 		return nil, nil, err
 	}
-
-	cleanup := func() { _ = f.Close() }
-	if h.algorithm == AlgorithmAES {
-		if f, cleanup, err = decryptArchive(f, path, password, h); err != nil {
+	if h.algorithm == AlgorithmNone {
+		// 不压缩不加密的归档直接读原文件，没有明文要暂存
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			_ = f.Close()
 			return nil, nil, err
 		}
+		return f, func() { _ = f.Close() }, nil
+	}
+
+	// 解密、解压出来的都是明文，放到本机的暂存目录，用完连目录一起删
+	stage, err := newStaging()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	cleanup := func() { stage.remove() }
+	plain := f
+	if h.algorithm == AlgorithmAES {
 		// 解出来的是内层归档，它自己的公共头说明压缩算法
-		if h, err = readHeader(f, path); err != nil {
+		if h, plain, err = decryptArchive(f, path, password, h, stage); err != nil {
 			cleanup()
 			return nil, nil, err
 		}
@@ -94,101 +108,152 @@ func openArchive(path, password string) (*os.File, func(), error) {
 		}
 	}
 	if h.algorithm == AlgorithmNone {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		return f, cleanup, nil
+		return plain, cleanup, nil
 	}
-
-	inner, innerCleanup, err := uncompressArchive(f, path, h)
-	cleanup() // uncompressArchive 已经关掉了 f，这里再清掉可能残留的临时文件
+	inner, err := uncompressArchive(plain, path, h, stage)
 	if err != nil {
+		cleanup()
 		return nil, nil, err
 	}
-	return inner, innerCleanup, nil
+	return inner, cleanup, nil
 }
 
-// decryptArchive 先核对口令，再把密文解到临时文件；存盘字节的 CRC64 对不上就删掉重来。
-// 口令不对时一个字节都不解
-func decryptArchive(f *os.File, path, password string, h header) (*os.File, func(), error) {
+// decryptArchive 核对口令、认证整份归档，再把密文解进暂存目录，返回解密后的文件和它开头的公共头。
+// 口令不对或者认证不过时一个字节都不解
+func decryptArchive(f *os.File, path, password string, h header, stage *staging) (header, *os.File, error) {
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return header{}, nil, err
 	}
 	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
-		return nil, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
+		return header{}, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
 	}
-
-	key := aescbc.DeriveKey(password, h.enc.salt[:])
-	if verifier := aescbc.Verifier(key); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
-		return nil, nil, errs.New(errs.WrongPassword).At(path)
+	keys, err := unseal(f, path, password, h)
+	if err != nil {
+		return header{}, nil, err
 	}
-	transform := func(r io.Reader, w io.Writer) error {
-		err := aescbc.Decrypt(r, w, key, h.enc.iv[:])
-		if errors.Is(err, aescbc.ErrPadding) {
-			return errs.Wrap(err, errs.Corrupted)
-		}
-		return err
+	// CRC64 和认证标签刚才都核过了，这里只管解密
+	plain, err := stage.file("decrypted")
+	if err != nil {
+		return header{}, nil, err
 	}
-	return toTemp(h, h.encRaw, f, path, transform)
+	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	err = aescbc.Decrypt(f, plain, keys.Encrypt, h.enc.iv[:])
+	if errors.Is(err, aescbc.ErrPadding) {
+		err = errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if err != nil {
+		return header{}, nil, err
+	}
+	if _, err := plain.Seek(0, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	inner, err := readHeader(plain, path)
+	if err != nil {
+		return header{}, nil, err
+	}
+	// 读头把位置推进了，调用方还要从头读一遍内层归档
+	if _, err := plain.Seek(0, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	return inner, plain, nil
 }
 
-func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
+// unseal 核对口令，再核对存盘字节的 CRC64 和认证标签，都过了才交出这份归档的密钥
+func unseal(f *os.File, path, password string, h header) (aescbc.Keys, error) {
+	// 迭代次数是归档说了算的，先卡住上限再去派生，不然一份归档就能让人算上几分钟
+	if h.enc.iterations == 0 || h.enc.iterations > aescbc.MaxIterations {
+		return aescbc.Keys{}, errs.Newf(errs.Corrupted, "iterations %d", h.enc.iterations).At(path)
+	}
+	keys, err := aescbc.DeriveKeys(password, h.enc.salt[:], int(h.enc.iterations))
+	if err != nil {
+		return aescbc.Keys{}, errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if verifier := keys.Verifier(); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
+		return aescbc.Keys{}, errs.New(errs.WrongPassword).At(path)
+	}
+	if err := checkSeal(f, h, keys); err != nil {
+		return aescbc.Keys{}, err.At(path)
+	}
+	return keys, nil
+}
+
+// checkSeal 把存盘的字节从头到尾读一遍，核对公共头里的 CRC64 和扩展头里的认证标签
+func checkSeal(f *os.File, h header, keys aescbc.Keys) *errs.Error {
+	crc := crc64.New(crcTable)
+	mac := keys.MAC()
+	if err := readSeal(f, h, io.MultiWriter(crc, mac)); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	if crc.Sum64() != h.crc {
+		return errs.Newf(errs.Corrupted, "checksum mismatch")
+	}
+	if subtle.ConstantTimeCompare(mac.Sum(nil), h.enc.mac[:]) != 1 {
+		return errs.Newf(errs.Corrupted, "authentication failed")
+	}
+	return nil
+}
+
+// readSeal 把归档存盘的字节从头到尾读进 w。
+// CRC64 和认证标签是回填的，算的时候按 0 计入，这里也换成 0
+func readSeal(f *os.File, h header, w io.Writer) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	_, _ = w.Write(h.raw[:archiveHeaderSize-crcSize])
+	_, _ = w.Write(zeroCRC[:])
+	_, _ = w.Write(h.encRaw[:encMACOffset])
+	_, _ = w.Write(zeroMAC[:])
+	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
+		return err
+	}
+	_, err := io.Copy(w, f)
+	return err
+}
+
+// uncompressArchive 把压缩的归档解进暂存目录，顺带核对存盘字节的 CRC64；读完关掉 f
+func uncompressArchive(f *os.File, path string, h header, stage *staging) (*os.File, error) {
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if h.dataOffset < archiveHeaderSize || h.dataOffset > info.Size() {
-		return nil, nil, errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
+		return nil, errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
 	}
 	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	transform := func(r io.Reader, w io.Writer) error {
-		return decompress(h.algorithm, r, w)
-	}
-	return toTemp(h, nil, f, path, transform)
-}
-
-// toTemp 把 r 经 transform 写进临时文件，同时核对存盘字节的 CRC64；
-// extra 是记录区之前、不属于公共头的字节（加密扩展头），校验时一并算进去
-func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
-	tmp, err := os.CreateTemp("", "dbkp-*")
+	plain, err := stage.file("uncompressed")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	crc := crc64.New(crcTable)
 	_, _ = crc.Write(h.raw[:archiveHeaderSize-crcSize])
 	_, _ = crc.Write(zeroCRC[:])
-	_, _ = crc.Write(extra)
-	src := io.TeeReader(r, crc)
-	err = transform(src, tmp)
+	src := io.TeeReader(f, crc)
+	err = decompress(h.algorithm, src, plain)
 	if err == nil {
-		// 变换没读完的尾部也要算进校验值
+		// 解压器没读完的尾部也要算进校验值
 		_, err = io.Copy(io.Discard, src)
 	}
 	if err == nil && crc.Sum64() != h.crc {
-		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
+		err = errs.Newf(errs.Corrupted, "checksum mismatch")
 	}
 	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
+		_, err = plain.Seek(0, io.SeekStart)
 	}
 	if err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
 		var e *errs.Error
 		if errors.As(err, &e) {
-			return nil, nil, e.At(path)
+			return nil, e.At(path)
 		}
-		return nil, nil, err
+		return nil, err
 	}
-	return tmp, func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}, nil
+	return plain, nil
 }

@@ -47,6 +47,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// 清扫是顺手的事，失败了不影响本次操作
+	if err := backup.SweepStaging(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
 	if err := run(ctx, os.Args[1:]); err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(os.Stderr, "已取消")

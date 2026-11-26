@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"client/internal/errs"
@@ -187,6 +188,39 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 			t.Errorf("stat %q = %v, want the archive", dst, err)
 		}
 	})
+}
+
+// 调用方给的 Entry 坏了要报 InvalidArgument，且不留任何归档文件。
+// 归档路径只用 '/' 分隔，反斜杠在 Windows 上是分隔符，混进来还原时会跑错地方。
+func TestPackRejectsInvalidEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		bad  Entry
+	}{
+		{"路径跳出源目录", Entry{Path: "../x", Kind: KindFile, Size: 1}},
+		{"路径是绝对的", Entry{Path: "/x", Kind: KindFile, Size: 1}},
+		{"路径带反斜杠", Entry{Path: `a\b`, Kind: KindFile, Size: 1}},
+		{"路径超过 1 MiB", Entry{Path: strings.Repeat("a", maxPathBytes+1), Kind: KindFile, Size: 1}},
+		{"Kind 是零值", Entry{Path: "x", Kind: 0}},
+		{"Kind 不认识", Entry{Path: "x", Kind: Kind(9)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			writeFile(t, filepath.Join(src, "ok.txt"), "aaa")
+			entries := append(scanOK(t, src), tc.bad)
+
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "backup.dbkp")
+			_, err := Pack(context.Background(), dst, src, entries, PackOptions{})
+			if problem := errOn(err, tc.bad.Path, errs.ErrInvalidArgument); problem != nil {
+				t.Errorf("Pack() %v", problem)
+			}
+			if problem := checkNothingLeft(dir); problem != nil {
+				t.Errorf("Pack() %v", problem)
+			}
+		})
+	}
 }
 
 // 成功后不留临时文件；再打一次覆盖已有归档。

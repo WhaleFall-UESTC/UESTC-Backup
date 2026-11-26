@@ -34,8 +34,7 @@ func ReadIndex(archive, password string) ([]Record, error) {
 		if rec.Kind != KindFile {
 			return nil
 		}
-		_, err := a.f.Seek(paddedSize(rec.Size), io.SeekCurrent)
-		return err
+		return a.skipData(rec)
 	})
 	return records, err
 }
@@ -121,8 +120,7 @@ func countIndex(path string, f *os.File) (Stats, error) {
 		}
 		stats.Files++
 		stats.Bytes += rec.Size
-		_, err := f.Seek(paddedSize(rec.Size), io.SeekCurrent)
-		return err
+		return a.skipData(rec)
 	})
 	return stats, err
 }
@@ -218,6 +216,24 @@ func (a *archiveReader) each(fn func(Record) error) error {
 			return err
 		}
 	}
+}
+
+// skipData 跳过一条文件记录的数据区。os.File.Seek 越过文件尾不报错，只拿读不读得到
+// 下一条记录的头分不出读完和截断，所以要拿文件长度卡边界
+func (a *archiveReader) skipData(rec Record) error {
+	info, err := a.f.Stat()
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	pos, err := a.f.Seek(paddedSize(rec.Size), io.SeekCurrent)
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	if rec.Size > info.Size() || pos > info.Size() {
+		// incomplete(io.EOF) 即 Err 是 io.ErrUnexpectedEOF，和 checkData 读到半截时的错误一样
+		return incomplete(io.EOF, "data is incomplete").At(rec.Path)
+	}
+	return nil
 }
 
 // checkData 读掉一条文件记录的数据区，核对文件内容的 CRC64。

@@ -227,14 +227,6 @@ func (r *restorer) writeFile(target string, rec Record) error {
 	return nil
 }
 
-// skipData 跳过一条文件记录的数据区
-func (a *archiveReader) skipData(rec Record) error {
-	if _, err := a.f.Seek(paddedSize(rec.Size), io.SeekCurrent); err != nil {
-		return errs.Wrap(err, errs.IO).At(rec.Path)
-	}
-	return nil
-}
-
 // freeName 找一个没被占用的名字：a.txt → a.1.txt、a.2.txt
 func freeName(target string) (string, error) {
 	ext := filepath.Ext(target)
