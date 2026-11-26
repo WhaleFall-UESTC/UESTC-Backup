@@ -57,16 +57,19 @@ func (s *Store) List() []Meta {
 	return out
 }
 
-func (s *Store) Open(id string) (*Meta, *os.File, error) {
+// Open 按 id 找元数据，返回一份拷贝。id 以后会拼进 blobs 的路径，长得像路径的按不存在处理
+func (s *Store) Open(id string) (*Meta, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !filepath.IsLocal(id) {
+		return nil, os.ErrNotExist
+	}
 	for i := range s.metas {
 		if s.metas[i].ID == id {
-			f, err := os.Open(filepath.Join(s.dir, "blobs", id))
 			m := s.metas[i]
-			return &m, f, err
+			return &m, nil
 		}
 	}
-	return nil, nil, os.ErrNotExist
+	return nil, os.ErrNotExist
 }

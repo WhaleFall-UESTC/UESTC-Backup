@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,5 +47,44 @@ func TestListReturnsACopy(t *testing.T) {
 	again := s.List()
 	if len(again) != 1 || again[0].ID != "abc" {
 		t.Errorf("List() = %v after the caller mutated the first copy, want the untouched meta", again)
+	}
+}
+
+// meta.json 里的 id 原样拼进 blobs 的路径，长得像路径的 id 不能放行
+func TestOpenRejectsPathishID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("s"), 0o600); err != nil {
+		t.Fatalf("Setup failed: write secret.txt: %v", err)
+	}
+	ids := []string{"../secret.txt", "..", "", `a\..\..\secret.txt`}
+	var metas []Meta
+	for _, id := range ids {
+		metas = append(metas, Meta{ID: id})
+	}
+	s := &Store{dir: dir, metas: metas}
+
+	for _, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			m, err := s.Open(id)
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("Open(%q) = %v, %v; want os.ErrNotExist", id, m, err)
+			}
+		})
+	}
+}
+
+// 正常的 id 返回那份元数据
+func TestOpenReturnsMeta(t *testing.T) {
+	s := &Store{dir: t.TempDir(), metas: []Meta{{ID: "abc", Name: "a.dbkp"}}}
+
+	m, err := s.Open("abc")
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", "abc", err)
+	}
+	if m.ID != "abc" || m.Name != "a.dbkp" {
+		t.Errorf("Open() meta = %+v, want the stored meta", m)
+	}
+	if _, err := s.Open("nope"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Open(%q) error = %v, want os.ErrNotExist", "nope", err)
 	}
 }
