@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,7 +63,8 @@ func (s *Store) Open(id string) (*Meta, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !filepath.IsLocal(id) {
+	// 反斜杠只在 Windows 上是路径分隔符，Linux 上 filepath.IsLocal 会放行
+	if !filepath.IsLocal(id) || strings.ContainsRune(id, '\\') {
 		return nil, os.ErrNotExist
 	}
 	for i := range s.metas {
