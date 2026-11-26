@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"client/internal/errs"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,31 @@ func rewrittenArchive(t *testing.T, change func(raw []byte)) string {
 	change(raw)
 
 	archive := filepath.Join(t.TempDir(), "patched.dbkp")
+	if err := os.WriteFile(archive, raw, 0o644); err != nil {
+		t.Fatalf("Setup failed: write the archive: %v", err)
+	}
+	return archive
+}
+
+// forgedRecord 拼一条伪造的记录。Pack 会拒绝这样的 Entry，只能直接拼字节，
+// 用来测读取方对伪造记录的防御
+func forgedRecord(path string, kind byte) []byte {
+	rec := make([]byte, layoutRecordHeaderSize+len(path))
+	rec[0] = kind
+	binary.LittleEndian.PutUint32(rec[28:], uint32(len(path)))
+	copy(rec[layoutRecordHeaderSize:], path)
+	return rec
+}
+
+// forgedArchive 拼一份带单条伪造记录的归档，公共头同空归档
+func forgedArchive(t *testing.T, path string, kind byte) string {
+	raw := make([]byte, layoutHeaderSize)
+	copy(raw[0:layoutMagicSize], archiveMagic)
+	binary.LittleEndian.PutUint16(raw[layoutVersionOffset:], archiveVersion)
+	binary.LittleEndian.PutUint64(raw[layoutDataOffset:], uint64(layoutHeaderSize))
+	raw = append(raw, forgedRecord(path, kind)...)
+
+	archive := filepath.Join(t.TempDir(), "forged.dbkp")
 	if err := os.WriteFile(archive, raw, 0o644); err != nil {
 		t.Fatalf("Setup failed: write the archive: %v", err)
 	}

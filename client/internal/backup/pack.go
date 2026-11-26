@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"client/internal/errs"
 )
@@ -106,12 +107,30 @@ func finalize(ctx context.Context, files packFiles, rawSize int64, dst string, o
 		keep = files.encrypted
 	}
 
+	// 断电时没有 Sync 的话改名可能成功而数据还在页缓存里，盘上留下零填充的归档
+	if err := syncFile(keep); err != nil {
+		cleanup()
+		return err
+	}
 	if err := os.Rename(keep, dst); err != nil {
 		cleanup()
 		return err
 	}
 	cleanup() // keep 已经改名到 dst，剩下的是输掉的那几份
 	return nil
+}
+
+// syncFile 把文件内容刷到盘上。句柄要有写权限才能 Sync，所以用 O_WRONLY 开
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // CheckDestination 拒绝把归档放进源目录，否则它会把自己也打进去。
@@ -181,7 +200,16 @@ func writeArchiveHeader(w io.Writer, algo Algorithm) error {
 }
 
 // writeArchiveRecord 写一条记录；文件读不了时返回 Skip，不算致命错误。
+// Entry 是调用方给的，Kind 和路径先要合法：路径只用 '/' 分隔，越界的写进归档还原时会跑到源目录外
 func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
+	switch e.Kind {
+	case KindFile, KindDir, KindSymlink:
+	default:
+		return nil, errs.Newf(errs.InvalidArgument, "kind %d", e.Kind).At(e.Path)
+	}
+	if !filepath.IsLocal(e.Path) || strings.ContainsRune(e.Path, '\\') || len(e.Path) > maxPathBytes {
+		return nil, errs.Newf(errs.InvalidArgument, "path %q", e.Path).At(e.Path)
+	}
 	if e.Size < 0 {
 		return nil, errs.Newf(errs.InvalidArgument, "size %d", e.Size).At(e.Path)
 	}
