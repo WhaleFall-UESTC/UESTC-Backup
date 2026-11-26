@@ -19,9 +19,15 @@ type PackOptions struct {
 	Progress  func(Progress)
 }
 
+// packFiles 是打包时三个阶段的产物各写到哪：不压缩的归档、压缩后的归档、密文。
+// 成品是其中一个改名成 dst，其余的都删掉
+type packFiles struct {
+	raw, compressed, encrypted string
+}
+
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
 // Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样；
-// Password 不为空时再加密整份归档
+// Password 不为空时再加密整份归档，目标目录里只落密文
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
 	if err := CheckDestination(dst, src); err != nil {
 		return nil, err
@@ -30,12 +36,22 @@ func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOption
 		return nil, errs.Newf(errs.InvalidArgument, "unknown algorithm %d", opts.Algorithm)
 	}
 
-	tmp := dst + ".tmp"
-	skips, size, err := packRaw(ctx, tmp, src, entries, opts)
+	files := packFiles{raw: dst + ".tmp", compressed: dst + ".cmp.tmp", encrypted: dst + ".enc.tmp"}
+	// 原样归档和压缩后的归档都是明文。带口令时把它们放到本机的暂存目录，不经过目标目录
+	if opts.Password != "" {
+		stage, err := newStaging()
+		if err != nil {
+			return nil, err
+		}
+		defer stage.remove()
+		files.raw, files.compressed, files.encrypted = stage.path("raw"), stage.path("compressed"), dst+".tmp"
+	}
+
+	skips, size, err := packRaw(ctx, files.raw, src, entries, opts)
 	if err != nil {
 		return nil, err
 	}
-	if err := finalize(ctx, tmp, size, dst, opts); err != nil {
+	if err := finalize(ctx, files, size, dst, opts); err != nil {
 		return nil, err
 	}
 	return skips, nil
@@ -60,38 +76,34 @@ func packRaw(ctx context.Context, dst, src string, entries []Entry, opts PackOpt
 	return skips, w.offset, nil
 }
 
-// finalize 依次接上压缩和加密，把成品落到 dst；中间文件不论成败都清掉
-func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts PackOptions) error {
-	temps := []string{raw}
+// finalize 依次接上压缩和加密，把成品改名成 dst；中间文件不论成败都清掉
+func finalize(ctx context.Context, files packFiles, rawSize int64, dst string, opts PackOptions) error {
+	temps := []string{files.raw, files.compressed, files.encrypted}
 	cleanup := func() {
 		for _, p := range temps {
 			_ = os.Remove(p)
 		}
 	}
 
-	keep := raw
+	keep := files.raw
 	if opts.Algorithm != AlgorithmNone {
 		emitPhase(opts.Progress, PhaseCompressing)
-		compressed := dst + ".cmp.tmp"
-		temps = append(temps, compressed)
-		size, err := compressFile(ctx, raw, compressed, opts.Algorithm)
+		size, err := compressFile(ctx, files.raw, files.compressed, opts.Algorithm)
 		if err != nil {
 			cleanup()
 			return err
 		}
 		if size < rawSize {
-			keep = compressed
+			keep = files.compressed
 		}
 	}
 	if opts.Password != "" {
 		emitPhase(opts.Progress, PhaseEncrypting)
-		encrypted := dst + ".enc.tmp"
-		temps = append(temps, encrypted)
-		if err := encryptFile(ctx, keep, encrypted, opts.Password); err != nil {
+		if err := encryptFile(ctx, keep, files.encrypted, opts.Password); err != nil {
 			cleanup()
 			return err
 		}
-		keep = encrypted
+		keep = files.encrypted
 	}
 
 	if err := os.Rename(keep, dst); err != nil {
