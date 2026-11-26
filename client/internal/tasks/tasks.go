@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"client/internal/backup"
 	"client/internal/errs"
@@ -62,8 +63,13 @@ func Save(path string, list []Task) error {
 	return nil
 }
 
-// Add 追加一条任务，名字和已有的重复时报错
+// Add 追加一条任务，名字和已有的重复时报错。
+// Source 和 Destination 转成绝对路径再落盘，任务换个目录执行还指向同一处
 func Add(list []Task, t Task) ([]Task, error) {
+	t, err := absTask(t)
+	if err != nil {
+		return nil, err
+	}
 	if err := Validate(t); err != nil {
 		return nil, err
 	}
@@ -71,6 +77,18 @@ func Add(list []Task, t Task) ([]Task, error) {
 		return nil, errs.Newf(errs.InvalidArgument, "task %q already exists", t.Name)
 	}
 	return append(list, t), nil
+}
+
+// absTask 把 Source 和 Destination 转成绝对路径
+func absTask(t Task) (Task, error) {
+	var err error
+	if t.Source, err = filepath.Abs(t.Source); err != nil {
+		return Task{}, err
+	}
+	if t.Destination, err = filepath.Abs(t.Destination); err != nil {
+		return Task{}, err
+	}
+	return t, nil
 }
 
 // Remove 删掉一条任务，名字不存在时报错
