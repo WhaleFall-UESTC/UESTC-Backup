@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -114,11 +116,11 @@ func diffRecords(got []Record, want []Entry) error {
 // 文件的内容要逐字节相同，文件的修改时间要一致。
 // 目录的修改时间不比：往目录里建文件会更新它，这一步不恢复。返回第一处不一致的说明。
 func diffTree(src, dst string) error {
-	want, err := Scan(src)
+	want, _, err := Scan(src)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", src, err)
 	}
-	got, err := Scan(dst)
+	got, _, err := Scan(dst)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", dst, err)
 	}
@@ -164,6 +166,29 @@ func entryNames(t *testing.T, dir string) []string {
 		names[i] = e.Name()
 	}
 	return names
+}
+
+// failingRecords 造出两条还原时必然失败的记录：fail 是文件，fail/child 在它下面建不出来
+func failingRecords(t *testing.T, src string) []Entry {
+	t.Helper()
+	writeFile(t, filepath.Join(src, "fail", "child"), "")
+	return []Entry{
+		{Path: "fail", Kind: KindFile, Size: 0},
+		{Path: "fail/child", Kind: KindFile, Size: 0},
+	}
+}
+
+// junction 创建指向 target 的目录联接；Windows 之外或者创建不了时跳过测试
+func junction(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("junction only exists on Windows")
+	}
+	if _, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Skipf("cannot create junction: %v", err)
+	}
+	// 清理按注册的逆序执行：这条先于目录的清理，只删联接本身
+	t.Cleanup(func() { _ = os.Remove(link) })
 }
 
 // layoutPaddedSize 是 n 个字节的数据区在归档里占的字节数：补零到 512 的整数倍。

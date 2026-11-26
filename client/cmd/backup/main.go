@@ -98,7 +98,7 @@ func runPack(ctx context.Context, args []string) error {
 	}
 	src, dst := c.fs.Arg(0), c.fs.Arg(1)
 
-	entries, err := backup.Scan(src)
+	entries, scanSkips, err := backup.Scan(src)
 	if err != nil {
 		return err
 	}
@@ -107,14 +107,21 @@ func runPack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range skips {
-		fmt.Fprintf(os.Stderr, "跳过 %s: %v\n", s.Path, s.Err)
-	}
-	fmt.Printf("已打包 %d 个节点到 %s（算法 %s），跳过 %d 个\n", len(entries)-len(skips), dst, *algoName, len(skips))
+	reportSkips(scanSkips)
+	reportSkips(skips)
+	fmt.Printf("已打包 %d 个节点到 %s（算法 %s），跳过 %d 个\n",
+		len(entries)-len(skips), dst, *algoName, len(scanSkips)+len(skips))
 	if c.password != "" {
 		fmt.Println("归档已加密")
 	}
 	return nil
+}
+
+// reportSkips 把扫描和打包时跳过的节点打到标准错误输出
+func reportSkips(skips []backup.Skip) {
+	for _, s := range skips {
+		fmt.Fprintf(os.Stderr, "跳过 %s: %v\n", s.Path, s.Err)
+	}
 }
 
 func runUnpack(ctx context.Context, args []string) error {

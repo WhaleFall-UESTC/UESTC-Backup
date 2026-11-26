@@ -152,7 +152,7 @@ func runTaskRun(ctx context.Context, args []string) error {
 		return errs.Newf(errs.InvalidArgument, "task %q: unknown algorithm %q", t.Name, t.Algorithm)
 	}
 
-	entries, err := backup.Scan(t.Source)
+	entries, scanSkips, err := backup.Scan(t.Source)
 	if err != nil {
 		return err
 	}
@@ -161,9 +161,9 @@ func runTaskRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range skips {
-		fmt.Fprintf(os.Stderr, "跳过 %s: %v\n", s.Path, s.Err)
-	}
-	fmt.Printf("任务 %s 已打包 %d 个节点到 %s，跳过 %d 个\n", t.Name, len(entries)-len(skips), t.Destination, len(skips))
+	reportSkips(scanSkips)
+	reportSkips(skips)
+	fmt.Printf("任务 %s 已打包 %d 个节点到 %s，跳过 %d 个\n",
+		t.Name, len(entries)-len(skips), t.Destination, len(scanSkips)+len(skips))
 	return nil
 }
