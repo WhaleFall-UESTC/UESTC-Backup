@@ -166,6 +166,16 @@ func entryNames(t *testing.T, dir string) []string {
 	return names
 }
 
+// failingRecords 造出两条还原时必然失败的记录：fail 是文件，fail/child 在它下面建不出来
+func failingRecords(t *testing.T, src string) []Entry {
+	t.Helper()
+	writeFile(t, filepath.Join(src, "fail", "child"), "")
+	return []Entry{
+		{Path: "fail", Kind: KindFile, Size: 0},
+		{Path: "fail/child", Kind: KindFile, Size: 0},
+	}
+}
+
 // layoutPaddedSize 是 n 个字节的数据区在归档里占的字节数：补零到 512 的整数倍。
 func layoutPaddedSize(n int64) int64 {
 	return (n + 511) / 512 * 512

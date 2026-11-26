@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"client/internal/errs"
 )
@@ -42,8 +43,8 @@ type UnpackResult struct {
 	Renamed  int
 }
 
-// Unpack 把归档还原到 dst。ConflictFail 时 dst 非空就拒绝；
-// 中途出错只删这次写出来的文件，目标里原有的东西不动。
+// Unpack 把归档还原到 dst。ConflictFail 时 dst 非空就拒绝
+// 中途出错只删这次新建的文件和目录：覆盖到一半的原样保留，已经覆盖成功的留着
 // password 在未加密的归档上被忽略
 func Unpack(ctx context.Context, archive, dst, password string, opts UnpackOptions) (UnpackResult, error) {
 	if !opts.Conflict.known() {
@@ -85,7 +86,7 @@ type restorer struct {
 	dst      string
 	conflict Conflict
 	result   UnpackResult
-	created  []string
+	created  []string // 这次新建的路径，出错时删掉
 }
 
 // all 按顺序还原全部记录，每处理完一个文件发一次进度
@@ -155,6 +156,7 @@ func (r *restorer) writeFile(target string, rec Record) error {
 		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
 
+	newFile := true
 	if exists {
 		switch r.conflict {
 		case ConflictSkip:
@@ -169,11 +171,22 @@ func (r *restorer) writeFile(target string, rec Record) error {
 			}
 			target = name
 			r.result.Renamed++
+		case ConflictOverwrite:
+			newFile = false
 		}
 	}
-	r.created = append(r.created, target)
-	if err := r.a.restoreFile(rec, target); err != nil {
-		return err
+	if newFile {
+		r.created = append(r.created, target)
+	}
+
+	var werr error
+	if newFile {
+		werr = r.a.restoreFile(rec, target)
+	} else {
+		werr = r.a.replaceFile(rec, target)
+	}
+	if werr != nil {
+		return werr
 	}
 	r.result.Restored++
 	return nil
@@ -219,14 +232,48 @@ func prepareTarget(dst string, conflict Conflict) error {
 	return nil
 }
 
-// restoreFile 在 target 处写出一条文件记录，写完恢复修改时间。
+// restoreFile 在 target 处写出一条文件记录，写完恢复修改时间
 func (a *archiveReader) restoreFile(rec Record, target string) error {
 	out, err := os.Create(target)
 	if err != nil {
 		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
+	if err := a.writeData(out, rec); err != nil {
+		return err
+	}
+	return setModTime(rec, target)
+}
 
-	_, err = io.CopyN(out, a.f, rec.Size)
+// replaceFile 写出一条文件记录并覆盖 target。先写到旁边的临时文件，写完才改名，
+// 中途出错时原有的 target 原样保留，符号链接也不会被跟过去
+func (a *archiveReader) replaceFile(rec Record, target string) (err error) {
+	tmp := filepath.Join(filepath.Dir(target),
+		fmt.Sprintf(".%s.%d.tmp", filepath.Base(target), time.Now().UnixNano()))
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666) //nolint:gosec // 同 os.Create，最终权限由 umask 决定
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if err = a.writeData(out, rec); err != nil {
+		return err
+	}
+	if err = setModTime(rec, tmp); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, target); err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	return nil
+}
+
+// writeData 把一条文件记录的数据区写进 out 并关掉它，再读掉补零
+func (a *archiveReader) writeData(out *os.File, rec Record) error {
+	_, err := io.CopyN(out, a.f, rec.Size)
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}
@@ -240,7 +287,12 @@ func (a *archiveReader) restoreFile(rec Record, target string) error {
 	if _, err := io.CopyN(io.Discard, a.f, paddedSize(rec.Size)-rec.Size); err != nil {
 		return incomplete(err, "padding is incomplete").At(rec.Path)
 	}
-	if err := os.Chtimes(target, rec.ModTime, rec.ModTime); err != nil {
+	return nil
+}
+
+// setModTime 把 path 的访问时间和修改时间都设成记录里的修改时间
+func setModTime(rec Record, path string) error {
+	if err := os.Chtimes(path, rec.ModTime, rec.ModTime); err != nil {
 		return errs.Wrap(err, errs.IO).At(rec.Path)
 	}
 	return nil
