@@ -67,21 +67,6 @@ func (k Keys) MAC() hash.Hash {
 	return hmac.New(sha256.New, k.Auth[:])
 }
 
-// DeriveKey 用口令和盐派生 32 字节密钥
-func DeriveKey(password string, salt []byte) [KeySize]byte {
-	h := sha256.New()
-	h.Write([]byte(password))
-	h.Write(salt)
-	var key [KeySize]byte
-	copy(key[:], h.Sum(nil))
-	return key
-}
-
-// Verifier 是存进归档、用来核对口令的值。它是密钥的哈希，拿到它也推不出密钥
-func Verifier(key [KeySize]byte) [sha256.Size]byte {
-	return sha256.Sum256(key[:])
-}
-
 // Encrypt 用 key 和 iv 把 r 加密到 w，末尾按 PKCS#7 补齐
 func Encrypt(r io.Reader, w io.Writer, key [KeySize]byte, iv []byte) error {
 	mode, err := newCBCMode(key, iv, true)

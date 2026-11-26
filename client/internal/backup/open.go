@@ -19,7 +19,7 @@ type header struct {
 	crc        uint64
 	raw        []byte // 读到的 24 个字节
 	enc        encHeader
-	encRaw     []byte // 读到的 64 个字节
+	encRaw     []byte // 读到的整个加密扩展头
 }
 
 // readHeader 读公共头并校验魔数、版本和算法；加密归档连扩展头一起读
@@ -59,9 +59,10 @@ func (h *header) readEnc(r io.Reader, path string) error {
 	if h.dataOffset != archiveEncDataOffset {
 		return errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
 	}
-	copy(h.enc.salt[:], h.encRaw[0:aesSaltSize])
-	copy(h.enc.iv[:], h.encRaw[aesSaltSize:aesSaltSize+aesIVSize])
-	copy(h.enc.verifier[:], h.encRaw[aesSaltSize+aesIVSize:archiveEncHeaderSize])
+	copy(h.enc.salt[:], h.encRaw[encSaltOffset:])
+	copy(h.enc.iv[:], h.encRaw[encIVOffset:])
+	h.enc.iterations = binary.LittleEndian.Uint32(h.encRaw[encIterOffset:])
+	copy(h.enc.verifier[:], h.encRaw[encVerifierOffset:])
 	return nil
 }
 
@@ -121,13 +122,19 @@ func decryptArchive(f *os.File, path, password string, h header) (*os.File, func
 	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
 		return nil, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
 	}
-
-	key := aescbc.DeriveKey(password, h.enc.salt[:])
-	if verifier := aescbc.Verifier(key); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
+	// 迭代次数是归档说了算，先卡住上限再去派生，不然一份归档就能让人算上几分钟
+	if h.enc.iterations == 0 || h.enc.iterations > aescbc.MaxIterations {
+		return nil, nil, errs.Newf(errs.Corrupted, "iterations %d", h.enc.iterations).At(path)
+	}
+	keys, err := aescbc.DeriveKeys(password, h.enc.salt[:], int(h.enc.iterations))
+	if err != nil {
+		return nil, nil, errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if verifier := keys.Verifier(); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
 		return nil, nil, errs.New(errs.WrongPassword).At(path)
 	}
 	transform := func(r io.Reader, w io.Writer) error {
-		err := aescbc.Decrypt(r, w, key, h.enc.iv[:])
+		err := aescbc.Decrypt(r, w, keys.Encrypt, h.enc.iv[:])
 		if errors.Is(err, aescbc.ErrPadding) {
 			return errs.Wrap(err, errs.Corrupted)
 		}

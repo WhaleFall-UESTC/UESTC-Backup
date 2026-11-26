@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"encoding/binary"
 	"hash/crc64"
 )
 
@@ -17,20 +18,21 @@ type Record struct {
 //	     0     4  Magic        "DBKP"
 //	     4     2  Version      1
 //	     6     2  Algorithm    0 不压缩 / 1 Huffman / 2 LZ77 / 3 AES-256-CBC
-//	     8     8  DataOffset   第一条记录的偏移：3 时是 88，其余是 24
+//	     8     8  DataOffset   第一条记录的偏移：3 时是 92，其余是 24
 //	    16     8  CRC64        整份归档的校验值
 //
 //	Algorithm 为 0 时，公共头后面直接是记录。为 1、2 时，后面是压过的整个归档：
 //	解开得到一份完整的、Algorithm 为 0 的 .dbkp。压缩不比原样小就改存原样，
 //	Algorithm 仍是 0。
 //
-//	Algorithm 为 3 时，公共头后面是 64 字节的加密扩展头，再后面是密文。密文解出来
+//	Algorithm 为 3 时，公共头后面是 68 字节的加密扩展头，再后面是密文。密文解出来
 //	是一份完整的 .dbkp，它自己的公共头说明压缩算法；加密作用在压缩之后。
 //
 //	  偏移  宽度  字段         取值
 //	    24    16  Salt         盐，每次加密随机
 //	    40    16  IV           CBC 的初始向量，每次加密随机
-//	    56    32  Verifier     密钥的 SHA-256，用来核对口令
+//	    56     4  Iterations   口令派生的 PBKDF2 轮数，打包时取 aescbc.Iterations
+//	    60    32  Verifier     加密密钥的 SHA-256，用来核对口令
 //
 //	密文按 PKCS#7 补齐，长度是 16 的整数倍。
 //
@@ -53,7 +55,7 @@ const (
 	archiveMagic         = "DBKP"
 	archiveVersion       = uint16(1)
 	archiveHeaderSize    = int64(24)
-	archiveEncHeaderSize = 64
+	archiveEncHeaderSize = 68
 	archiveEncDataOffset = archiveHeaderSize + archiveEncHeaderSize
 	recordHeaderSize     = 40
 	archiveAlignment     = int64(512)
@@ -61,7 +63,14 @@ const (
 	aesBlockSize    = 16
 	aesSaltSize     = 16
 	aesIVSize       = aesBlockSize
+	aesIterSize     = 4
 	aesVerifierSize = 32
+
+	// 加密扩展头里各字段的偏移
+	encSaltOffset     = 0
+	encIVOffset       = encSaltOffset + aesSaltSize
+	encIterOffset     = encIVOffset + aesIVSize
+	encVerifierOffset = encIterOffset + aesIterSize
 
 	crcFieldOffset = 32 // 记录头里 CRC64 的偏移
 	crcSize        = 8
@@ -95,19 +104,21 @@ func headerDataOffset(algo Algorithm) int64 {
 	return archiveHeaderSize
 }
 
-// encHeader 是加密扩展头：盐、IV 和口令校验值
+// encHeader 是加密扩展头：盐、IV、口令派生的迭代次数和口令校验值
 type encHeader struct {
-	salt     [aesSaltSize]byte
-	iv       [aesIVSize]byte
-	verifier [aesVerifierSize]byte
+	salt       [aesSaltSize]byte
+	iv         [aesIVSize]byte
+	iterations uint32
+	verifier   [aesVerifierSize]byte
 }
 
-// bytes 按字段表拼出扩展头的 64 个字节
+// bytes 按字段表拼出扩展头的 68 个字节
 func (h encHeader) bytes() []byte {
 	b := make([]byte, archiveEncHeaderSize)
-	copy(b[0:16], h.salt[:])
-	copy(b[16:32], h.iv[:])
-	copy(b[32:64], h.verifier[:])
+	copy(b[encSaltOffset:], h.salt[:])
+	copy(b[encIVOffset:], h.iv[:])
+	binary.LittleEndian.PutUint32(b[encIterOffset:], h.iterations)
+	copy(b[encVerifierOffset:], h.verifier[:])
 	return b
 }
 

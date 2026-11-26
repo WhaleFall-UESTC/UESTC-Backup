@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 加密归档的公共头、扩展头和大小都按字段表来，密文手工解出来就是一份不加密的 .dbkp
@@ -34,8 +35,8 @@ func TestPackEncryptedArchiveLayout(t *testing.T) {
 	if algo := Algorithm(binary.LittleEndian.Uint16(got[6:8])); algo != AlgorithmAES {
 		t.Errorf("Pack() stored algorithm %d, want %d", algo, AlgorithmAES)
 	}
-	if offset := binary.LittleEndian.Uint64(got[8:16]); offset != 88 {
-		t.Errorf("Pack() stored data offset %d, want 88", offset)
+	if offset := binary.LittleEndian.Uint64(got[8:16]); offset != uint64(archiveEncDataOffset) {
+		t.Errorf("Pack() stored data offset %d, want %d", offset, archiveEncDataOffset)
 	}
 	if want := int(archiveEncDataOffset) + (len(raw)/16+1)*16; len(got) != want {
 		t.Errorf("Pack() wrote %d bytes, want %d", len(got), want)
@@ -43,10 +44,13 @@ func TestPackEncryptedArchiveLayout(t *testing.T) {
 	if bytes.Equal(got[24:56], make([]byte, 32)) {
 		t.Error("Pack() left the salt and IV all zero")
 	}
+	if got := binary.LittleEndian.Uint32(got[56:60]); got != testIterations {
+		t.Errorf("Pack() stored %d iterations, want %d", got, testIterations)
+	}
 
-	key := aescbc.DeriveKey(password, got[24:40])
-	if verifier := aescbc.Verifier(key); !bytes.Equal(got[56:88], verifier[:]) {
-		t.Errorf("Pack() stored verifier % x, want % x", got[56:88], verifier)
+	keys := mustDerive(t, password, got)
+	if verifier := keys.Verifier(); !bytes.Equal(got[60:92], verifier[:]) {
+		t.Errorf("Pack() stored verifier % x, want % x", got[60:92], verifier)
 	}
 	if err := checkStoredCRC(got); err != nil {
 		t.Errorf("Pack() %v", err)
@@ -105,7 +109,7 @@ func TestPackEncryptsAfterCompression(t *testing.T) {
 	}
 }
 
-// 扩展头的字段顺序和宽度钉死：盐、IV、校验值各就各位，校验值是可复现的
+// 扩展头的字段顺序和宽度钉死：盐、IV、迭代次数、校验值各就各位，校验值是可复现的
 func TestEncryptedHeaderIsFrozen(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "")
@@ -118,6 +122,7 @@ func TestEncryptedHeaderIsFrozen(t *testing.T) {
 	var h encHeader
 	copy(h.salt[:], frozenSalt())
 	copy(h.iv[:], frozenIV())
+	h.iterations = testIterations
 	dst := filepath.Join(t.TempDir(), "enc.dbkp")
 	if err := sealArchive(context.Background(), rawPath, dst, "pw", h); err != nil {
 		t.Fatalf("Setup failed: sealArchive() error = %v", err)
@@ -131,16 +136,17 @@ func TestEncryptedHeaderIsFrozen(t *testing.T) {
 		'D', 'B', 'K', 'P', // Magic
 		0x01, 0x00, // Version = 1
 		0x03, 0x00, // Algorithm = 3
-		0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 88
+		0x5C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 92
 	}
 	if !bytes.Equal(got[:16], want) {
 		t.Errorf("public header = % x, want % x", got[:16], want)
 	}
 	want = append(frozenSalt(), frozenIV()...)
-	if !bytes.Equal(got[24:56], want) {
-		t.Errorf("salt and IV = % x, want % x", got[24:56], want)
+	want = append(want, 0xE8, 0x03, 0x00, 0x00) // Iterations = 1000
+	if !bytes.Equal(got[24:60], want) {
+		t.Errorf("salt, IV and iterations = % x, want % x", got[24:60], want)
 	}
-	if verifier := hex.EncodeToString(got[56:88]); verifier != frozenVerifier {
+	if verifier := hex.EncodeToString(got[60:92]); verifier != frozenVerifier {
 		t.Errorf("stored verifier = %s, want %s", verifier, frozenVerifier)
 	}
 	if err := checkStoredCRC(got); err != nil {
@@ -216,7 +222,7 @@ func TestEncryptedArchiveRejectsWrongPassword(t *testing.T) {
 }
 
 // 加密归档里坏一个字节或者少一段，Verify 和 Unpack 都要报错，Unpack 不写任何文件。
-// 改盐、改校验值算口令不对；改公共头、改密文算归档坏了
+// 改盐、改迭代次数、改校验值算口令不对；改公共头、改密文算归档坏了
 func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), strings.Repeat("内容 abc\n", 200))
@@ -241,7 +247,7 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 		{"公共头里的校验值", flip(16), errs.ErrCorrupted},
 		{"公共头里的数据偏移", flip(8), errs.ErrCorrupted},
 		{"扩展头里的盐", flip(24), errs.ErrWrongPassword},
-		{"扩展头里的校验值", flip(56), errs.ErrWrongPassword},
+		{"扩展头里的校验值", flip(60), errs.ErrWrongPassword},
 		{"扩展头里的 IV", flip(40), errs.ErrCorrupted},
 		{"密文中间", flip(int(archiveEncDataOffset) + 16), errs.ErrCorrupted},
 		{"密文最后一块", flip(len(raw) - 1), errs.ErrCorrupted},
@@ -271,6 +277,44 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 	}
 }
 
+// 迭代次数是从归档里读来的，不能让它想写多大就多大：
+// 是 0 或者超过上限的归档按坏归档拒绝，不去派生密钥
+func TestEncryptedArchiveRejectsAbsurdIterations(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "内容")
+	archive := packTreeEnc(t, root, scanOK(t, root), AlgorithmNone, "pw")
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatalf("Setup failed: read the archive: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		iterations uint32
+	}{
+		{"0 轮", 0},
+		{"刚好超过上限", aescbc.MaxIterations + 1},
+		{"接近 uint32 的上限", 0xFFFFFFF0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			broken := bytes.Clone(raw)
+			binary.LittleEndian.PutUint32(broken[56:60], tc.iterations)
+			path := filepath.Join(t.TempDir(), "broken.dbkp")
+			if err := os.WriteFile(path, broken, 0o644); err != nil {
+				t.Fatalf("Setup failed: write the damaged archive: %v", err)
+			}
+			start := time.Now()
+			err := Verify(context.Background(), path, "pw", VerifyOptions{})
+			if !errors.Is(err, errs.ErrCorrupted) {
+				t.Errorf("Verify() error = %v, want errs.Corrupted", err)
+			}
+			if d := time.Since(start); d > 2*time.Second {
+				t.Errorf("Verify() took %v with %d iterations in the header, want it to refuse before deriving", d, tc.iterations)
+			}
+		})
+	}
+}
+
 // 加密归档里面再套一层加密，读的时候按不支持拒绝，不能落到“算法不认识”上
 func TestNestedEncryptionIsRejected(t *testing.T) {
 	root := t.TempDir()
@@ -280,6 +324,7 @@ func TestNestedEncryptionIsRejected(t *testing.T) {
 	var h encHeader
 	copy(h.salt[:], frozenSalt())
 	copy(h.iv[:], frozenIV())
+	h.iterations = testIterations
 	outer := filepath.Join(t.TempDir(), "nested.dbkp")
 	if err := sealArchive(context.Background(), inner, outer, "pw", h); err != nil {
 		t.Fatalf("Setup failed: sealArchive() error = %v", err)
@@ -343,15 +388,26 @@ func packTreeEnc(t *testing.T, root string, entries []Entry, algo Algorithm, pas
 	return archive
 }
 
+// mustDerive 按一份加密归档里的盐和迭代次数派生密钥
+func mustDerive(t *testing.T, password string, raw []byte) aescbc.Keys {
+	t.Helper()
+	iterations := binary.LittleEndian.Uint32(raw[56:60])
+	keys, err := aescbc.DeriveKeys(password, raw[24:40], int(iterations))
+	if err != nil {
+		t.Fatalf("Setup failed: DeriveKeys() error = %v", err)
+	}
+	return keys
+}
+
 // decryptBytes 按字段表手工解开一份加密归档，返回内层 .dbkp 的字节
 func decryptBytes(t *testing.T, raw []byte, password string) []byte {
 	t.Helper()
 	if len(raw) < int(archiveEncDataOffset) {
 		t.Fatalf("Setup failed: the encrypted archive is only %d bytes", len(raw))
 	}
-	key := aescbc.DeriveKey(password, raw[24:40])
+	keys := mustDerive(t, password, raw)
 	var plain bytes.Buffer
-	if err := aescbc.Decrypt(bytes.NewReader(raw[archiveEncDataOffset:]), &plain, key, raw[40:56]); err != nil {
+	if err := aescbc.Decrypt(bytes.NewReader(raw[archiveEncDataOffset:]), &plain, keys.Encrypt, raw[40:56]); err != nil {
 		t.Fatalf("Setup failed: decrypt the archive: %v", err)
 	}
 	return plain.Bytes()
@@ -379,5 +435,5 @@ func frozenIV() []byte {
 	return []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f}
 }
 
-// frozenVerifier 是口令 "pw" 配上面的盐得到的校验值
-const frozenVerifier = "18fed495fc51dbb9824c230727f5282d49c7efd6b4c1278eb305c809e97bb872"
+// frozenVerifier 是口令 "pw" 配上面的盐、1000 轮派生出的校验值，和 aescbc 包里钉的是同一个值
+const frozenVerifier = "e411b8875d072ba9686fe47f3bdab0354e84b85ef66e384f6775ef6422da7d4d"
