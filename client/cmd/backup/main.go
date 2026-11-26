@@ -211,25 +211,34 @@ func (c *commonFlags) parse(args []string) error {
 	return nil
 }
 
-// progressPrinter 把进度刷到标准错误输出，同一个阶段原地覆盖
+// progressPrinter 把进度刷到标准错误输出，同一个阶段原地覆盖。
+// 行变短时补空格盖掉上一行的尾巴，不然长路径换成短路径会留下残字
 func progressPrinter(enabled bool) func(backup.Progress) {
 	if !enabled {
 		return nil
 	}
 	var lastAt time.Time
+	var lastLen int
 	return func(p backup.Progress) {
 		if p.TotalFiles == 0 {
 			fmt.Fprintf(os.Stderr, "%s…\n", p.Phase)
+			lastLen = 0
 			return
 		}
 		if p.DoneFiles < p.TotalFiles && time.Since(lastAt) < 100*time.Millisecond {
 			return
 		}
 		lastAt = time.Now()
-		fmt.Fprintf(os.Stderr, "\r%s %s %d/%d 个文件 %.1f/%.1f MB",
+		line := fmt.Sprintf("%s %s %d/%d 个文件 %.1f/%.1f MB",
 			p.Phase, p.Path, p.DoneFiles, p.TotalFiles, megabytes(p.DoneBytes), megabytes(p.TotalBytes))
+		if pad := lastLen - len(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		lastLen = len(line)
+		fmt.Fprintf(os.Stderr, "\r%s", line)
 		if p.DoneFiles == p.TotalFiles {
 			fmt.Fprintln(os.Stderr)
+			lastLen = 0
 		}
 	}
 }

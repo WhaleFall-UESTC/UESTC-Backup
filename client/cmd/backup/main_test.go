@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"client/internal/backup"
 	"client/internal/errs"
 )
 
@@ -83,6 +86,36 @@ func TestCommonFlagsRejectsMissingPasswordFile(t *testing.T) {
 	c := newCommonFlags("pack")
 	if err := c.parse([]string{"-password-file", filepath.Join(t.TempDir(), "nope.txt")}); err == nil {
 		t.Errorf("parse() with a missing password file = <nil>, want an error")
+	}
+}
+
+// 进度行变短时要把上一行的尾巴盖掉，长路径换成短路径后不能留下残字
+func TestProgressPrinterOverwritesShorterLines(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Setup failed: os.Pipe() error = %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	printer := progressPrinter(true)
+
+	printer(backup.Progress{Phase: backup.PhasePacking, Path: strings.Repeat("very/long/path/", 8), TotalFiles: 2, DoneFiles: 1, DoneBytes: 1 << 20, TotalBytes: 2 << 20})
+	printer(backup.Progress{Phase: backup.PhasePacking, Path: "a.txt", TotalFiles: 2, DoneFiles: 2, DoneBytes: 2 << 20, TotalBytes: 2 << 20})
+
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("Setup failed: close the pipe: %v", err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("Setup failed: read the pipe: %v", err)
+	}
+
+	segments := strings.Split(string(data), "\r")
+	last := segments[len(segments)-1]
+	want := "打包 a.txt 2/2 个文件 2.0/2.0 MB"
+	if got := strings.TrimRight(last, " \n"); got != want {
+		t.Errorf("the last progress line = %q, want %q plus spaces only", got, want)
 	}
 }
 
