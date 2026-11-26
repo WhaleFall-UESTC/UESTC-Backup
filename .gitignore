@@ -8,7 +8,6 @@ client/frontend/dist/*
 .idea/
 
 # Wails 自动生成的文件
-client/frontend/wailsjs/
 client/frontend/package.json.md5
 
 node_modules/

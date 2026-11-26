@@ -54,3 +54,27 @@ jobs:
           working-directory: client
           only-new-issues: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  frontend:
+    # CI 里没有 wails 命令，前端靠提交在仓库里的 wailsjs 绑定直接构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/frontend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        # npm run build 里带 vue-tsc --noEmit，类型检查不过这里就挂
+        run: npm run build
