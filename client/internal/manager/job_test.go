@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"client/internal/backup"
+	"client/internal/errs"
 	"client/internal/tasks"
 )
 
@@ -193,5 +195,61 @@ func TestUnsubscribeStopsEvents(t *testing.T) {
 
 	if evs := drainEvents(ch); len(evs) != 0 {
 		t.Errorf("got %d events after unsubscribe, want 0", len(evs))
+	}
+}
+
+// 正确口令校验通过，错误口令作业失败且类别是 WrongPassword，口令不出现在结果里
+func TestVerifyJobWithPasswords(t *testing.T) {
+	id, task := startBackup(t, flatSource(t, 3), "pw")
+	if s := waitState(t, id); s.State != StateDone {
+		t.Fatalf("backup State = %q, want %q", s.State, StateDone)
+	}
+
+	id, err := StartVerify(task.Destination, "pw")
+	if err != nil {
+		t.Fatalf("StartVerify() error = %v", err)
+	}
+	if s := waitState(t, id); s.State != StateDone || s.Result.Files != 3 {
+		t.Errorf("verify State = %q, Result = %+v, want done with 3 files", s.State, s.Result)
+	}
+
+	id, err = StartVerify(task.Destination, "wrong")
+	if err != nil {
+		t.Fatalf("StartVerify() error = %v", err)
+	}
+	s := waitState(t, id)
+	if s.State != StateFailed {
+		t.Fatalf("State = %q, want %q", s.State, StateFailed)
+	}
+	if s.Result == nil || s.Result.Code != int(errs.WrongPassword) {
+		t.Errorf("Result = %+v, want code WrongPassword", s.Result)
+	}
+	if s.Result != nil && strings.Contains(s.Result.Message, "pw") {
+		t.Errorf("failure message leaks the password: %q", s.Result.Message)
+	}
+}
+
+// 整份还原：文件数对得上，内容和源目录一致
+func TestRestoreJobRestoresWholeArchive(t *testing.T) {
+	id, task := startBackup(t, flatSource(t, 3), "")
+	if s := waitState(t, id); s.State != StateDone {
+		t.Fatalf("backup State = %q, want %q", s.State, StateDone)
+	}
+
+	dst := t.TempDir()
+	id, err := StartRestore(task.Destination, dst, "", backup.ConflictFail)
+	if err != nil {
+		t.Fatalf("StartRestore() error = %v", err)
+	}
+	s := waitState(t, id)
+	if s.State != StateDone || s.Result == nil || s.Result.Files != 3 {
+		t.Fatalf("restore State = %q, Result = %+v, want done with 3 files", s.State, s.Result)
+	}
+	for i := 0; i < 3; i++ {
+		name := filepath.Join(dst, fmt.Sprintf("f%04d.txt", i))
+		data, err := os.ReadFile(name)
+		if err != nil || string(data) != "data" {
+			t.Errorf("restored %s = %q, %v", name, data, err)
+		}
 	}
 }

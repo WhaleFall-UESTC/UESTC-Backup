@@ -170,6 +170,41 @@ func skipInfos(skips []backup.Skip) []SkipInfo {
 	return out
 }
 
+// StartVerify 起一个校验作业并返回作业号
+func StartVerify(archive, password string) (string, error) {
+	return start(KindVerify, "", func(ctx context.Context, emit func(backup.Progress)) (*Result, error) {
+		return runVerify(ctx, archive, password, emit)
+	})
+}
+
+// StartRestore 起一个整份还原的作业并返回作业号，conflict 是遇到已有文件的处理办法
+func StartRestore(archive, dst, password string, conflict backup.Conflict) (string, error) {
+	return start(KindRestore, "", func(ctx context.Context, emit func(backup.Progress)) (*Result, error) {
+		var last backup.Progress
+		opts := backup.UnpackOptions{
+			Conflict: conflict,
+			Progress: func(p backup.Progress) { last = p; emit(p) },
+		}
+		r, err := backup.Unpack(ctx, archive, dst, password, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &Result{Files: r.Restored, Renamed: r.Renamed, Skipped: r.Skipped, Bytes: last.DoneBytes}, nil
+	})
+}
+
+// runVerify 把整份归档核对一遍，文件数和字节数取进度走到的位置
+func runVerify(ctx context.Context, archive, password string, emit func(backup.Progress)) (*Result, error) {
+	var last backup.Progress
+	err := backup.Verify(ctx, archive, password, backup.VerifyOptions{
+		Progress: func(p backup.Progress) { last = p; emit(p) },
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Files: last.DoneFiles, Bytes: last.DoneBytes}, nil
+}
+
 // start 登记一个作业并让它在自己的 goroutine 里跑，返回作业号
 func start(kind, taskName string, exec func(ctx context.Context, emit func(backup.Progress)) (*Result, error)) (string, error) {
 	jobsMu.Lock()
