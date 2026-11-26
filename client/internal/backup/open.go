@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	"hash"
 	"hash/crc64"
 	"io"
 	"os"
@@ -68,7 +67,7 @@ func (h *header) readEnc(r io.Reader, path string) error {
 	return nil
 }
 
-// openArchive 打开归档，按需解密、解压到临时文件，返回位置在开头的内层 .dbkp。
+// openArchive 打开归档，按需解密、解压到暂存目录，返回位置在开头的内层 .dbkp。
 // password 在未加密的归档上被忽略；调用方必须调用返回的 cleanup
 func openArchive(path, password string) (*os.File, func(), error) {
 	f, err := os.Open(path)
@@ -80,14 +79,26 @@ func openArchive(path, password string) (*os.File, func(), error) {
 		_ = f.Close()
 		return nil, nil, err
 	}
-
-	cleanup := func() { _ = f.Close() }
-	if h.algorithm == AlgorithmAES {
-		if f, cleanup, err = decryptArchive(f, path, password, h); err != nil {
+	if h.algorithm == AlgorithmNone {
+		// 不压缩不加密的归档直接读原文件，没有明文要暂存
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			_ = f.Close()
 			return nil, nil, err
 		}
+		return f, func() { _ = f.Close() }, nil
+	}
+
+	// 解密、解压出来的都是明文，放到本机的暂存目录，用完连目录一起删
+	stage, err := newStaging()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	cleanup := func() { stage.remove() }
+	plain := f
+	if h.algorithm == AlgorithmAES {
 		// 解出来的是内层归档，它自己的公共头说明压缩算法
-		if h, err = readHeader(f, path); err != nil {
+		if h, plain, err = decryptArchive(f, path, password, h, stage); err != nil {
 			cleanup()
 			return nil, nil, err
 		}
@@ -97,57 +108,52 @@ func openArchive(path, password string) (*os.File, func(), error) {
 		}
 	}
 	if h.algorithm == AlgorithmNone {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		return f, cleanup, nil
+		return plain, cleanup, nil
 	}
-
-	inner, innerCleanup, err := uncompressArchive(f, path, h)
-	cleanup() // uncompressArchive 已经关掉了 f，这里再清掉可能残留的临时文件
+	inner, err := uncompressArchive(plain, path, h, stage)
 	if err != nil {
+		cleanup()
 		return nil, nil, err
 	}
-	return inner, innerCleanup, nil
+	return inner, cleanup, nil
 }
 
-// decryptArchive 核对口令、认证整份归档，再把密文解到临时文件。
+// decryptArchive 核对口令、认证整份归档，再把密文解进暂存目录，返回解密后的文件和它开头的公共头。
 // 口令不对或者认证不过时一个字节都不解
-func decryptArchive(f *os.File, path, password string, h header) (*os.File, func(), error) {
+func decryptArchive(f *os.File, path, password string, h header, stage *staging) (header, *os.File, error) {
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return header{}, nil, err
 	}
 	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
-		return nil, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
+		return header{}, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
 	}
 	keys, err := unseal(f, path, password, h)
 	if err != nil {
-		return nil, nil, err
+		return header{}, nil, err
 	}
 	// CRC64 和认证标签刚才都核过了，这里只管解密
-	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
-		return nil, nil, err
-	}
-	transform := func(r io.Reader, w io.Writer) error {
-		err := aescbc.Decrypt(r, w, keys.Encrypt, h.enc.iv[:])
-		if errors.Is(err, aescbc.ErrPadding) {
-			return errs.Wrap(err, errs.Corrupted)
-		}
-		return err
-	}
-	plain, cleanup, err := transformToTemp(f, transform)
+	plain, err := stage.file("decrypted")
 	if err != nil {
-		var e *errs.Error
-		if errors.As(err, &e) {
-			return nil, nil, e.At(path)
-		}
-		return nil, nil, err
+		return header{}, nil, err
 	}
-	return plain, cleanup, nil
+	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	err = aescbc.Decrypt(f, plain, keys.Encrypt, h.enc.iv[:])
+	if errors.Is(err, aescbc.ErrPadding) {
+		err = errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if err != nil {
+		return header{}, nil, err
+	}
+	if _, err := plain.Seek(0, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	inner, err := readHeader(plain, path)
+	return inner, plain, err
 }
 
 // unseal 核对口令，再核对存盘字节的 CRC64 和认证标签，都过了才交出这份归档的密钥
@@ -202,75 +208,45 @@ func readSeal(f *os.File, h header, w io.Writer) error {
 	return err
 }
 
-// uncompressArchive 把压缩的归档解到临时文件，顺带核对存盘字节的 CRC64
-func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
+// uncompressArchive 把压缩的归档解进暂存目录，顺带核对存盘字节的 CRC64；读完关掉 f
+func uncompressArchive(f *os.File, path string, h header, stage *staging) (*os.File, error) {
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if h.dataOffset < archiveHeaderSize || h.dataOffset > info.Size() {
-		return nil, nil, errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
+		return nil, errs.Newf(errs.Corrupted, "data offset %d", h.dataOffset).At(path)
 	}
 	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	plain, err := stage.file("uncompressed")
+	if err != nil {
+		return nil, err
 	}
 	crc := crc64.New(crcTable)
 	_, _ = crc.Write(h.raw[:archiveHeaderSize-crcSize])
 	_, _ = crc.Write(zeroCRC[:])
-	transform := func(r io.Reader, w io.Writer) error {
-		return decompress(h.algorithm, r, w)
+	src := io.TeeReader(f, crc)
+	err = decompress(h.algorithm, src, plain)
+	if err == nil {
+		// 解压器没读完的尾部也要算进校验值
+		_, err = io.Copy(io.Discard, src)
 	}
-	return toTemp(h, crc, f, path, transform)
-}
-
-// toTemp 把 r 经 transform 写进临时文件，同时核对存盘字节的 CRC64。
-// crc 是读到 r 之前已经算了一段的校验值，r 读到的字节都算进去，变换没读完的尾部也要算
-func toTemp(h header, crc hash.Hash64, r io.Reader, path string, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
-	plain, cleanup, err := transformToTemp(io.TeeReader(r, crc), drainAfter(transform))
 	if err == nil && crc.Sum64() != h.crc {
-		cleanup()
 		err = errs.Newf(errs.Corrupted, "checksum mismatch")
+	}
+	if err == nil {
+		_, err = plain.Seek(0, io.SeekStart)
 	}
 	if err != nil {
 		var e *errs.Error
 		if errors.As(err, &e) {
-			return nil, nil, e.At(path)
+			return nil, e.At(path)
 		}
-		return nil, nil, err
+		return nil, err
 	}
-	return plain, cleanup, nil
-}
-
-// drainAfter 让 transform 跑完之后把 r 剩下的字节读干净
-func drainAfter(transform func(io.Reader, io.Writer) error) func(io.Reader, io.Writer) error {
-	return func(r io.Reader, w io.Writer) error {
-		if err := transform(r, w); err != nil {
-			return err
-		}
-		_, err := io.Copy(io.Discard, r)
-		return err
-	}
-}
-
-// transformToTemp 把 r 经 transform 写进临时文件，返回位置在开头的文件；出错时不留文件
-func transformToTemp(r io.Reader, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
-	tmp, err := os.CreateTemp("", "dbkp-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}
-	err = transform(r, tmp)
-	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
-	}
-	if err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	return tmp, cleanup, nil
+	return plain, nil
 }
