@@ -95,12 +95,30 @@ func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts P
 		keep = encrypted
 	}
 
+	// 断电时没有 Sync 的话改名可能成功而数据还在页缓存里，盘上留下零填充的归档
+	if err := syncFile(keep); err != nil {
+		cleanup()
+		return err
+	}
 	if err := os.Rename(keep, dst); err != nil {
 		cleanup()
 		return err
 	}
 	cleanup() // keep 已经改名到 dst，剩下的是输掉的那几份
 	return nil
+}
+
+// syncFile 把文件内容刷到盘上。句柄要有写权限才能 Sync，所以用 O_WRONLY 开
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // CheckDestination 拒绝把归档放进源目录，否则它会把自己也打进去。
