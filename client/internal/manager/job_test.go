@@ -344,3 +344,45 @@ func TestProgressMonotonic(t *testing.T) {
 		t.Errorf("final = %d/%d files, Result = %+v, want 3000", s.DoneFiles, s.TotalFiles, s.Result)
 	}
 }
+
+// Snapshots 按启动顺序返回全部作业，状态跟着作业走，界面重载后靠它恢复
+func TestSnapshotsListsAllJobs(t *testing.T) {
+	useTempConfig(t)
+	jobsMu.Lock()
+	jobs = map[string]*job{}
+	jobsMu.Unlock()
+
+	task := addBackupTask(t, "a", flatSource(t, 3000), "none", "")
+	first, err := StartBackup(task.Name, "")
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+	if snaps := Snapshots(); len(snaps) != 1 || snaps[0].ID != first || snaps[0].State != StateRunning {
+		t.Errorf("Snapshots() while running = %+v, want one running job %s", snaps, first)
+	}
+
+	if err := Cancel(first); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	waitState(t, first)
+
+	secondTask := addBackupTask(t, "b", flatSource(t, 1), "none", "")
+	second, err := StartBackup(secondTask.Name, "")
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+	if s := waitState(t, second); s.State != StateDone {
+		t.Fatalf("State = %q, want %q", s.State, StateDone)
+	}
+
+	snaps := Snapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("Snapshots() = %+v, want 2 jobs", snaps)
+	}
+	if snaps[0].ID != first || snaps[0].State != StateCancelled {
+		t.Errorf("Snapshots()[0] = %+v, want cancelled job %s", snaps[0], first)
+	}
+	if snaps[1].ID != second || snaps[1].State != StateDone {
+		t.Errorf("Snapshots()[1] = %+v, want done job %s", snaps[1], second)
+	}
+}

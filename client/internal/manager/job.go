@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -321,6 +324,22 @@ func GetJob(id string) (Snapshot, error) {
 		return Snapshot{}, errs.Newf(errs.InvalidArgument, "job %q not found", id)
 	}
 	return j.snapshotValue(), nil
+}
+
+// Snapshots 返回全部作业的快照，按启动顺序排好，界面重载后靠它恢复
+func Snapshots() []Snapshot {
+	jobsMu.Lock()
+	defer jobsMu.Unlock()
+	out := make([]Snapshot, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, j.snapshotValue())
+	}
+	sort.Slice(out, func(i, k int) bool {
+		a, _ := strconv.Atoi(strings.TrimPrefix(out[i].ID, "job-"))
+		b, _ := strconv.Atoi(strings.TrimPrefix(out[k].ID, "job-"))
+		return a < b
+	})
+	return out
 }
 
 // Subscribe 订阅作业事件，之后发布的每个快照都会回调 fn；回调不许阻塞，返回退订函数
