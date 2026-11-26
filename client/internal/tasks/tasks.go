@@ -13,12 +13,13 @@ import (
 	"client/internal/errs"
 )
 
-// Task 是一条备份任务。口令不落盘，跑的时候单独给
+// Task 是一条备份任务。口令不落盘，Encrypted 只记这个任务加密，跑的时候口令单独给
 type Task struct {
 	Name        string `json:"name"`
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
 	Algorithm   string `json:"algorithm"`
+	Encrypted   bool   `json:"encrypted"`
 }
 
 // Load 读出任务列表；文件不存在时是空列表。字段名不认识按坏配置报错
@@ -77,6 +78,26 @@ func Add(list []Task, t Task) ([]Task, error) {
 		return nil, errs.Newf(errs.InvalidArgument, "task %q already exists", t.Name)
 	}
 	return append(list, t), nil
+}
+
+// Update 把 name 指向的任务换成 t，换之前重新校验；任务不存在或新名字和别的任务重复报错
+func Update(list []Task, name string, t Task) ([]Task, error) {
+	t, err := absTask(t)
+	if err != nil {
+		return nil, err
+	}
+	if err := Validate(t); err != nil {
+		return nil, err
+	}
+	i := Find(list, name)
+	if i < 0 {
+		return nil, errs.Newf(errs.InvalidArgument, "task %q not found", name)
+	}
+	if j := Find(list, t.Name); j >= 0 && j != i {
+		return nil, errs.Newf(errs.InvalidArgument, "task %q already exists", t.Name)
+	}
+	list[i] = t
+	return list, nil
 }
 
 // absTask 把 Source 和 Destination 转成绝对路径
