@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"client/internal/errs"
 )
@@ -169,7 +170,16 @@ func writeArchiveHeader(w io.Writer, algo Algorithm) error {
 }
 
 // writeArchiveRecord 写一条记录；文件读不了时返回 Skip，不算致命错误。
+// Entry 是调用方给的，Kind 和路径先要合法：路径只用 '/' 分隔，越界的写进归档还原时会跑到源目录外
 func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
+	switch e.Kind {
+	case KindFile, KindDir, KindSymlink:
+	default:
+		return nil, errs.Newf(errs.InvalidArgument, "kind %d", e.Kind).At(e.Path)
+	}
+	if !filepath.IsLocal(e.Path) || strings.ContainsRune(e.Path, '\\') || len(e.Path) > maxPathBytes {
+		return nil, errs.Newf(errs.InvalidArgument, "path %q", e.Path).At(e.Path)
+	}
 	if e.Size < 0 {
 		return nil, errs.Newf(errs.InvalidArgument, "size %d", e.Size).At(e.Path)
 	}
