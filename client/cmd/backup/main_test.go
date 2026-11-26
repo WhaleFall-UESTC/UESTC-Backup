@@ -56,6 +56,36 @@ func TestRunPackReportsPartialBackup(t *testing.T) {
 	}
 }
 
+// -password-file 从文件读口令，行尾的换行不算口令的一部分
+func TestCommonFlagsPasswordFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "pw.txt")
+	writeFile(t, file, "secret\r\n")
+	c := newCommonFlags("pack")
+	if err := c.parse([]string{"-password-file", file}); err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	if c.password != "secret" {
+		t.Errorf("password = %q, want %q", c.password, "secret")
+	}
+}
+
+// -password 和 -password-file 一起给分不清哪个算数
+func TestCommonFlagsRejectsTwoPasswords(t *testing.T) {
+	c := newCommonFlags("pack")
+	err := c.parse([]string{"-password", "a", "-password-file", "b"})
+	if err == nil {
+		t.Errorf("parse() with both -password and -password-file = <nil>, want an error")
+	}
+}
+
+// 口令文件读不了要把底层错误报出来，不能当成没给口令
+func TestCommonFlagsRejectsMissingPasswordFile(t *testing.T) {
+	c := newCommonFlags("pack")
+	if err := c.parse([]string{"-password-file", filepath.Join(t.TempDir(), "nope.txt")}); err == nil {
+		t.Errorf("parse() with a missing password file = <nil>, want an error")
+	}
+}
+
 // ---------- 辅助函数 ----------
 
 func writeFile(t *testing.T, path, content string) {

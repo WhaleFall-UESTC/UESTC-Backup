@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"client/internal/backup"
@@ -24,7 +25,7 @@ const usage = `用法:
   backup task run [-config tasks.json] [-password 口令] [-progress=false] <名称>
 
 -algo 默认 lz77，压完不比原样小就改存原样
--password 不为空时加密归档，还原和校验要提供同一个口令
+-password 不为空时加密归档，还原和校验要提供同一个口令；给口令更建议 -password-file，免得进 shell 历史和进程列表
 -progress 默认开启，把进度打到标准错误输出
 -on-conflict 默认 fail，目标目录非空就拒绝
 任务文件默认是当前目录的 tasks.json，口令不存进去`
@@ -173,15 +174,17 @@ func runVerify(ctx context.Context, args []string) error {
 
 // commonFlags 是三个子命令共用的选项
 type commonFlags struct {
-	fs       *flag.FlagSet
-	password string
-	progress bool
+	fs           *flag.FlagSet
+	password     string
+	passwordFile string
+	progress     bool
 }
 
 func newCommonFlags(name string) *commonFlags {
 	c := &commonFlags{fs: flag.NewFlagSet(name, flag.ContinueOnError)}
 	c.fs.SetOutput(io.Discard) // 错误和用法由 usageErr 一起打印
 	c.fs.StringVar(&c.password, "password", "", "口令，加密归档要提供")
+	c.fs.StringVar(&c.passwordFile, "password-file", "", "从文件读口令，行尾换行不算")
 	c.fs.BoolVar(&c.progress, "progress", true, "把进度打到标准错误输出")
 	return c
 }
@@ -194,6 +197,16 @@ func (c *commonFlags) parse(args []string) error {
 			return flag.ErrHelp
 		}
 		return usageErr("%v", err)
+	}
+	if c.password != "" && c.passwordFile != "" {
+		return usageErr("-password 和 -password-file 只能给一个")
+	}
+	if c.passwordFile != "" {
+		data, err := os.ReadFile(c.passwordFile)
+		if err != nil {
+			return err
+		}
+		c.password = strings.TrimRight(string(data), "\r\n")
 	}
 	return nil
 }
