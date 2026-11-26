@@ -123,6 +123,26 @@ func TestReadIndexRejectsTruncatedArchive(t *testing.T) {
 	}
 }
 
+// 截断落在文件的数据区里也要报错：Seek 越过文件尾不报错，只靠读不到下一条记录的头
+// 分不出“读完了”和“被截断了”
+func TestReadIndexRejectsTruncatedData(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a.bin"), string(dataBytes(2048)))
+	raw := packBytes(t, src, []Entry{{Path: "a.bin", Kind: KindFile, Size: 2048}})
+	archive := filepath.Join(t.TempDir(), "cut.dbkp")
+
+	dataStart := layoutHeaderSize + layoutRecordHeaderSize + len("a.bin")
+	for _, n := range []int{dataStart + 1, dataStart + 511, dataStart + 1024, dataStart + 2047} {
+		if err := os.WriteFile(archive, raw[:n], 0o644); err != nil {
+			t.Fatalf("Setup failed: write an archive of %d bytes: %v", n, err)
+		}
+		_, err := ReadIndex(archive, "")
+		if problem := errOn(err, "a.bin", errs.ErrCorrupted); problem != nil {
+			t.Errorf("ReadIndex() on the first %d bytes: %v", n, problem)
+		}
+	}
+}
+
 // 归档是外来数据：记录头里的长度字段坏了，不能让读取方往回跳，也不能让它一次分配几个 GB。
 func TestReadIndexRejectsInvalidRecordHeader(t *testing.T) {
 	src := t.TempDir()
