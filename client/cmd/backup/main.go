@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"client/internal/backup"
@@ -24,7 +25,7 @@ const usage = `用法:
   backup task run [-config tasks.json] [-password 口令] [-progress=false] <名称>
 
 -algo 默认 lz77，压完不比原样小就改存原样
--password 不为空时加密归档，还原和校验要提供同一个口令
+-password 不为空时加密归档，还原和校验要提供同一个口令；给口令更建议 -password-file，免得进 shell 历史和进程列表
 -progress 默认开启，把进度打到标准错误输出
 -on-conflict 默认 fail，目标目录非空就拒绝
 任务文件默认是当前目录的 tasks.json，口令不存进去`
@@ -118,6 +119,10 @@ func runPack(ctx context.Context, args []string) error {
 	if c.password != "" {
 		fmt.Println("归档已加密")
 	}
+	// 跳过是备份不完整，退出码要说出来，定时任务才能察觉
+	if n := len(scanSkips) + len(skips); n > 0 {
+		return errs.Newf(errs.PartialBackup, "%d files skipped", n)
+	}
 	return nil
 }
 
@@ -173,15 +178,17 @@ func runVerify(ctx context.Context, args []string) error {
 
 // commonFlags 是三个子命令共用的选项
 type commonFlags struct {
-	fs       *flag.FlagSet
-	password string
-	progress bool
+	fs           *flag.FlagSet
+	password     string
+	passwordFile string
+	progress     bool
 }
 
 func newCommonFlags(name string) *commonFlags {
 	c := &commonFlags{fs: flag.NewFlagSet(name, flag.ContinueOnError)}
 	c.fs.SetOutput(io.Discard) // 错误和用法由 usageErr 一起打印
 	c.fs.StringVar(&c.password, "password", "", "口令，加密归档要提供")
+	c.fs.StringVar(&c.passwordFile, "password-file", "", "从文件读口令，行尾换行不算")
 	c.fs.BoolVar(&c.progress, "progress", true, "把进度打到标准错误输出")
 	return c
 }
@@ -195,28 +202,47 @@ func (c *commonFlags) parse(args []string) error {
 		}
 		return usageErr("%v", err)
 	}
+	if c.password != "" && c.passwordFile != "" {
+		return usageErr("-password 和 -password-file 只能给一个")
+	}
+	if c.passwordFile != "" {
+		data, err := os.ReadFile(c.passwordFile)
+		if err != nil {
+			return err
+		}
+		c.password = strings.TrimRight(string(data), "\r\n")
+	}
 	return nil
 }
 
-// progressPrinter 把进度刷到标准错误输出，同一个阶段原地覆盖
+// progressPrinter 把进度刷到标准错误输出，同一个阶段原地覆盖。
+// 行变短时补空格盖掉上一行的尾巴，不然长路径换成短路径会留下残字
 func progressPrinter(enabled bool) func(backup.Progress) {
 	if !enabled {
 		return nil
 	}
 	var lastAt time.Time
+	var lastLen int
 	return func(p backup.Progress) {
 		if p.TotalFiles == 0 {
 			fmt.Fprintf(os.Stderr, "%s…\n", p.Phase)
+			lastLen = 0
 			return
 		}
 		if p.DoneFiles < p.TotalFiles && time.Since(lastAt) < 100*time.Millisecond {
 			return
 		}
 		lastAt = time.Now()
-		fmt.Fprintf(os.Stderr, "\r%s %s %d/%d 个文件 %.1f/%.1f MB",
+		line := fmt.Sprintf("%s %s %d/%d 个文件 %.1f/%.1f MB",
 			p.Phase, p.Path, p.DoneFiles, p.TotalFiles, megabytes(p.DoneBytes), megabytes(p.TotalBytes))
+		if pad := lastLen - len(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		lastLen = len(line)
+		fmt.Fprintf(os.Stderr, "\r%s", line)
 		if p.DoneFiles == p.TotalFiles {
 			fmt.Fprintln(os.Stderr)
+			lastLen = 0
 		}
 	}
 }
