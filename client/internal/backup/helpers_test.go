@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -174,6 +176,19 @@ func failingRecords(t *testing.T, src string) []Entry {
 		{Path: "fail", Kind: KindFile, Size: 0},
 		{Path: "fail/child", Kind: KindFile, Size: 0},
 	}
+}
+
+// junction 创建指向 target 的目录联接；Windows 之外或者创建不了时跳过测试
+func junction(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("junction only exists on Windows")
+	}
+	if _, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Skipf("cannot create junction: %v", err)
+	}
+	// 清理按注册的逆序执行：这条先于目录的清理，只删联接本身
+	t.Cleanup(func() { _ = os.Remove(link) })
 }
 
 // layoutPaddedSize 是 n 个字节的数据区在归档里占的字节数：补零到 512 的整数倍。

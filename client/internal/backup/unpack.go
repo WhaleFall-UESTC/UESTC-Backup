@@ -45,6 +45,7 @@ type UnpackResult struct {
 
 // Unpack 把归档还原到 dst。ConflictFail 时 dst 非空就拒绝
 // 中途出错只删这次新建的文件和目录：覆盖到一半的原样保留，已经覆盖成功的留着
+// 已有的符号链接和目录联接不跟过去写
 // password 在未加密的归档上被忽略
 func Unpack(ctx context.Context, archive, dst, password string, opts UnpackOptions) (UnpackResult, error) {
 	if !opts.Conflict.known() {
@@ -71,7 +72,10 @@ func Unpack(ctx context.Context, archive, dst, password string, opts UnpackOptio
 		return UnpackResult{}, err
 	}
 
-	r := &restorer{a: a, archive: archive, dst: dst, conflict: opts.Conflict}
+	r := &restorer{
+		a: a, archive: archive, dst: dst, conflict: opts.Conflict,
+		dirs: map[string]bool{filepath.Clean(dst): true},
+	}
 	if err := r.all(ctx, stats, opts.Progress); err != nil {
 		r.undo()
 		return UnpackResult{}, err
@@ -79,14 +83,15 @@ func Unpack(ctx context.Context, archive, dst, password string, opts UnpackOptio
 	return r.result, nil
 }
 
-// restorer 是一次还原的状态：冲突策略、结果统计，以及出错时要删掉的东西
+// restorer 是一次还原的状态：冲突策略、结果统计、确认过的目录，以及出错时要删掉的东西
 type restorer struct {
 	a        *archiveReader
 	archive  string
 	dst      string
 	conflict Conflict
 	result   UnpackResult
-	created  []string // 这次新建的路径，出错时删掉
+	created  []string        // 这次新建的路径，出错时删掉
+	dirs     map[string]bool // 确认过是普通目录的路径，只往这些目录里写
 }
 
 // all 按顺序还原全部记录，每处理完一个文件发一次进度
@@ -127,7 +132,7 @@ func (r *restorer) record(rec Record) error {
 	target := filepath.Join(r.dst, filepath.FromSlash(rec.Path))
 	switch rec.Kind {
 	case KindDir:
-		return r.makeDir(target, rec)
+		return r.ensureDir(target, rec.Path)
 	case KindFile:
 		return r.writeFile(target, rec)
 	case KindSymlink:
@@ -137,18 +142,48 @@ func (r *restorer) record(rec Record) error {
 	return errs.Newf(errs.Corrupted, "record kind %d", rec.Kind).At(r.archive)
 }
 
-func (r *restorer) makeDir(target string, rec Record) error {
-	if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
-		r.created = append(r.created, target)
+// ensureDir 确认 dir 和它的上级都是普通目录，缺的逐级建出来并记进 created
+func (r *restorer) ensureDir(dir, name string) error {
+	if r.dirs[dir] {
+		return nil
 	}
-	if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
-		return errs.Wrap(err, errs.IO).At(rec.Path)
+	if err := r.ensureDir(filepath.Dir(dir), name); err != nil {
+		return err
 	}
+	err := r.makePlainDir(dir, name)
+	r.dirs[dir] = err == nil
+	return err
+}
+
+// makePlainDir 让 dir 处是一个普通目录。已有的符号链接、目录联接不跟过去：
+// overwrite 时先删掉再建目录，其余策略报错；已有的是文件时一律报错
+func (r *restorer) makePlainDir(dir, name string) error {
+	info, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return errs.Wrap(err, errs.IO).At(name)
+	case info.IsDir():
+		return nil
+	case info.Mode().IsRegular() || r.conflict != ConflictOverwrite:
+		return errs.Newf(errs.IO, "path is not a directory").At(name)
+	default:
+		if err := os.Remove(dir); err != nil {
+			return errs.Wrap(err, errs.IO).At(name)
+		}
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // 还原出来的目录按惯例 0755
+		return errs.Wrap(err, errs.IO).At(name)
+	}
+	r.created = append(r.created, dir)
 	return nil
 }
 
 // writeFile 按冲突策略写出一个文件，跳过的也要把数据区读掉
 func (r *restorer) writeFile(target string, rec Record) error {
+	if err := r.ensureDir(filepath.Dir(target), rec.Path); err != nil {
+		return err
+	}
 	exists := false
 	if _, err := os.Lstat(target); err == nil {
 		exists = true

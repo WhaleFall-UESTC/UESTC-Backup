@@ -226,6 +226,88 @@ func TestUnpackOverwriteSurvivesLaterFailure(t *testing.T) {
 	}
 }
 
+// 中途出错时，这次建出来的目录也一并清掉，包括归档里没有单独列出的上级目录
+func TestUnpackUndoRemovesCreatedDirs(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "x", "y", "f.txt"), "f")
+	entries := append([]Entry{
+		{Path: "x/y", Kind: KindDir},
+		{Path: "x/y/f.txt", Kind: KindFile, Size: 1},
+	}, failingRecords(t, src)...)
+	archive := packTree(t, src, entries)
+
+	dst := t.TempDir()
+	_, err := Unpack(context.Background(), archive, dst, "", UnpackOptions{})
+	if !errors.Is(err, errs.ErrIO) {
+		t.Fatalf("Unpack() error = %v, want errs.IO", err)
+	}
+	if got := entryNames(t, dst); len(got) != 0 {
+		t.Errorf("the target holds %v after the failed call, want nothing", got)
+	}
+}
+
+// 目标目录里已有的符号链接和目录联接，还原时不跟过去写：
+// overwrite 把链接换成真目录，其余策略报错
+func TestUnpackDoesNotWriteThroughLinks(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "proj", "evil.txt"), "evil")
+	withDir := scanOK(t, src)
+	fileOnly := []Entry{{Path: "proj/evil.txt", Kind: KindFile, Size: 4}}
+
+	links := []struct {
+		name string
+		make func(t *testing.T, target, link string)
+	}{
+		{"符号链接", symlink},
+		{"目录联接", junction},
+	}
+	tests := []struct {
+		name    string
+		policy  Conflict
+		entries []Entry
+		blocked string // 报错的那条记录；空串表示还原成功
+	}{
+		{"overwrite 换成真目录", ConflictOverwrite, withDir, ""},
+		{"overwrite 归档里没有目录记录", ConflictOverwrite, fileOnly, ""},
+		{"skip 报错", ConflictSkip, withDir, "proj"},
+		{"rename 报错", ConflictRename, withDir, "proj"},
+	}
+	for _, l := range links {
+		for _, tc := range tests {
+			t.Run(l.name+"/"+tc.name, func(t *testing.T) {
+				base := t.TempDir()
+				outside := filepath.Join(base, "outside")
+				dst := filepath.Join(base, "dst")
+				writeFile(t, filepath.Join(outside, "keep.txt"), "keep")
+				if err := os.MkdirAll(dst, 0o755); err != nil {
+					t.Fatalf("Setup failed: create the target: %v", err)
+				}
+				l.make(t, outside, filepath.Join(dst, "proj"))
+
+				_, err := Unpack(context.Background(), packTree(t, src, tc.entries), dst, "", UnpackOptions{Conflict: tc.policy})
+				if tc.blocked != "" {
+					if problem := errOn(err, tc.blocked, errs.ErrIO); problem != nil {
+						t.Fatalf("Unpack() %v", problem)
+					}
+				} else if err != nil {
+					t.Fatalf("Unpack() error = %v, want <nil>", err)
+				}
+				if got := entryNames(t, outside); !slices.Equal(got, []string{"keep.txt"}) {
+					t.Errorf("the link target now holds %v, want only keep.txt", got)
+				}
+				if tc.blocked == "" {
+					if got := readFile(t, filepath.Join(dst, "proj", "evil.txt")); got != "evil" {
+						t.Errorf("proj/evil.txt = %q, want %q", got, "evil")
+					}
+					if info, err := os.Lstat(filepath.Join(dst, "proj")); err != nil || !info.IsDir() {
+						t.Errorf("proj should now be a plain directory, got %v (%v)", info, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // 目标是已有的符号链接文件时，overwrite 换掉的是链接本身，不动它指向的文件
 func TestUnpackOverwriteReplacesSymlinkItself(t *testing.T) {
 	src := t.TempDir()
