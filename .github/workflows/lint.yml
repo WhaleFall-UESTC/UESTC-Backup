@@ -2,7 +2,6 @@ name: Lint
 
 on:
   pull_request:
-    branches: [ master ]
 
 permissions:
   contents: read
@@ -42,7 +41,7 @@ jobs:
         working-directory: client
         env:
           CGO_ENABLED: "0"
-        run: go test ./internal/... -count=1
+        run: go test ./... -count=1
 
       - name: Run golangci-lint
         # 建议级：结论照常贴在 PR 上，但不阻断合并；基础质量由上面的 gofmt/vet/test 保证
