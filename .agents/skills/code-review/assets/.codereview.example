@@ -28,10 +28,6 @@ custom_rules:
   #   check: "函数参数中应包含context.Context"
   #   severity: suggestion
 
-# 报告输出配置
-# 支持变量: ${requirement} - 需求名称, ${date} - 日期, ${time} - 时间
-output: code-review/CR-${requirement}-${date}.md
-
 # 自定义编程规范文档路径
 # 如果需要使用团队自定义的编程规范,在此处指定路径
 coding_standards:
@@ -284,23 +280,6 @@ languages:
     check_property_order: true
     check_vendor_prefixes: true
     check_naming_conventions: true
-
-# 报告配置
-report:
-  # 报告格式: markdown, html, json
-  format: markdown
-  
-  # 是否包含代码片段
-  include_code_snippets: true
-  
-  # 代码片段上下文行数
-  snippet_context_lines: 3
-  
-  # 是否包含统计图表
-  include_charts: false
-  
-  # 是否包含改进建议汇总
-  include_summary: true
 
 # 通知配置
 notifications:

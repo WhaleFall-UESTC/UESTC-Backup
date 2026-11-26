@@ -1,15 +1,15 @@
 ---
 name: code-review
-description: 深度代码审查工具：分析 Git/SVN 变更，评估逻辑、代码规范、安全及需求一致性，支持CodeReview报告。
+description: 深度代码审查工具：分析 Git/SVN 变更，评估逻辑、代码规范、安全及需求一致性，结论直接在对话里输出。
 ---
 
 # 代码审查技能
 
-执行超越 lint 的深度分析，识别安全漏洞、并发问题、潜在 Bug、架构设计问题，并生成专业报告。支持 **Git** 和 **SVN** 两种版本控制系统，自动检测当前项目的 VCS 类型。
+执行超越 lint 的深度分析，识别安全漏洞、并发问题、潜在 Bug、架构设计问题，结论直接在对话里说明，不生成文档。支持 **Git** 和 **SVN** 两种版本控制系统，自动检测当前项目的 VCS 类型。
 
 ## 工作流程
 
-**0.配置** → **1.需求** → **2.代码变更** → **3.Lint** → **4.架构分析** → **5.深度审查** → **6.报告** → **7.Todo清单**
+**0.配置** → **1.需求** → **2.代码变更** → **3.Lint** → **4.架构分析** → **5.深度审查** → **6.结论** → **7.Todo清单**
 
 ---
 
@@ -139,7 +139,7 @@ python3 scripts/lint_check.py -l <go|java|cpp|python|kotlin> [--repo <path>]
 
 ## 步骤 4: 架构分析
 
-生成规格文档 `docs/spec-<功能名称>-<日期>.md`，包含：
+在对话里说明架构，不生成文档：
 - 架构概览、数据流、关键组件、业务逻辑、错误处理
 
 如有需求文档，执行对比分析：✅已实现 / ⚠️部分实现 / ❌缺失
@@ -199,11 +199,9 @@ python3 scripts/sync_standards.py --all
 
 ---
 
-## 步骤 6: 生成报告
+## 步骤 6: 输出结论
 
-使用 `assets/report-template.md` 模板生成报告，保存至 `docs/code-review-<功能名称>-<日期>.md`。
-
-报告结构：基本信息 → 需求符合性 → 代码质量分析 → 深度审查结果 → 专项评估 → 总结评分
+把发现的问题直接写在对话里，不生成任何文档文件。每条带位置、现象和建议，按严重程度排序。
 
 ---
 
@@ -247,7 +245,6 @@ python3 scripts/sync_standards.py --all
 
 ## 资源文件
 
-- `assets/report-template.md` - 报告模板
 - `assets/.codereview.example` - 配置示例
 - `assets/.golangci.yml` - Go lint默认配置
 - `references/coding-standards/` - 各语言审查标准
