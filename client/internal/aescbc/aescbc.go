@@ -3,17 +3,69 @@ package aescbc
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/hmac"
+	"crypto/pbkdf2"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 )
 
-// KeySize 是 AES-256 的密钥长度
+// KeySize 是 AES-256 密钥的长度，也是认证密钥的长度
 const KeySize = 32
+
+// Iterations 是打包时口令派生的默认迭代次数。
+// MaxIterations 是读归档时接受的上限：归档里写的次数是不可信的，再大只会把人拖慢，不会更安全
+const (
+	Iterations    = 600_000
+	MaxIterations = 20_000_000
+)
 
 // ErrPadding 表示密文长度不对，或者去掉补齐后不是合法的 PKCS#7
 var ErrPadding = errors.New("aescbc: invalid padding")
+
+var errIterations = errors.New("aescbc: iterations must be positive")
+
+// keysInfo 是把派生结果分成两把密钥时用的上下文串，换掉它派生出的密钥就全变了
+const keysInfo = "UESTC-Backup AES-256-CBC + HMAC-SHA256"
+
+// Keys 是一份加密归档用的两把密钥：一把给 AES-CBC 加密，一把给 HMAC 认证
+type Keys struct {
+	Encrypt [KeySize]byte
+	Auth    [KeySize]byte
+}
+
+// DeriveKeys 用口令和盐派生两把密钥：先做 iterations 轮 PBKDF2-HMAC-SHA256，
+// 再展开成加密密钥和认证密钥。轮数越多，拿到归档的人离线穷举口令越慢
+func DeriveKeys(password string, salt []byte, iterations int) (Keys, error) {
+	if iterations < 1 {
+		return Keys{}, errIterations
+	}
+	secret, err := pbkdf2.Key(sha256.New, password, salt, iterations, KeySize)
+	if err != nil {
+		return Keys{}, err
+	}
+	both, err := hkdf.Expand(sha256.New, secret, keysInfo, 2*KeySize)
+	if err != nil {
+		return Keys{}, err
+	}
+	var k Keys
+	copy(k.Encrypt[:], both[:KeySize])
+	copy(k.Auth[:], both[KeySize:])
+	return k, nil
+}
+
+// Verifier 是存进归档、用来核对口令的值。它是加密密钥的哈希，拿到它也推不出密钥
+func (k Keys) Verifier() [sha256.Size]byte {
+	return sha256.Sum256(k.Encrypt[:])
+}
+
+// MAC 返回用认证密钥初始化的 HMAC-SHA256
+func (k Keys) MAC() hash.Hash {
+	return hmac.New(sha256.New, k.Auth[:])
+}
 
 // DeriveKey 用口令和盐派生 32 字节密钥
 func DeriveKey(password string, salt []byte) [KeySize]byte {
