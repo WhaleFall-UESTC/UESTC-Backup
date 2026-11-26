@@ -19,13 +19,13 @@ const usage = `用法:
   backup pack [-algo none|lz77|huffman] [-password 口令] [-progress=false] <源目录> <归档>
   backup unpack [-password 口令] [-progress=false] [-on-conflict fail|overwrite|skip|rename] <归档> <目标目录>
   backup verify [-password 口令] [-progress=false] <归档>
-  backup task add -name 名称 -source 源目录 -dest 归档 [-algo none|lz77|huffman] [-config tasks.json]
+  backup task add -name 名称 -source 源目录 -dest 归档 [-algo none|lz77|huffman] [-encrypt] [-config tasks.json]
   backup task list [-config tasks.json]
   backup task remove [-config tasks.json] <名称>
   backup task run [-config tasks.json] [-password 口令] [-progress=false] <名称>
 
 -algo 默认 lz77，压完不比原样小就改存原样
--password 不为空时加密归档，还原和校验要提供同一个口令；给口令更建议 -password-file，免得进 shell 历史和进程列表
+-password 不为空时加密归档，还原和校验要提供同一个口令；加密任务运行时必须提供；给口令更建议 -password-file，免得进 shell 历史和进程列表
 -progress 默认开启，把进度打到标准错误输出
 -on-conflict 默认 fail，目标目录非空就拒绝
 任务文件默认是当前目录的 tasks.json，口令不存进去`

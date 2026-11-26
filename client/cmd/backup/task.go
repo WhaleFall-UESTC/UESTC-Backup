@@ -41,6 +41,7 @@ func runTaskAdd(args []string) error {
 	source := flags.String("source", "", "源目录")
 	dest := flags.String("dest", "", "归档路径")
 	algo := flags.String("algo", "lz77", "压缩算法：none、lz77、huffman")
+	encrypt := flags.Bool("encrypt", false, "归档加密，运行和还原时要给口令")
 	if err := flags.Parse(args); errors.Is(err, flag.ErrHelp) {
 		fmt.Println(usage)
 		return nil
@@ -55,7 +56,7 @@ func runTaskAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	t := tasks.Task{Name: *name, Source: *source, Destination: *dest, Algorithm: *algo}
+	t := tasks.Task{Name: *name, Source: *source, Destination: *dest, Algorithm: *algo, Encrypted: *encrypt}
 	if list, err = tasks.Add(list, t); err != nil {
 		return err
 	}
@@ -144,6 +145,10 @@ func runTaskRun(ctx context.Context, args []string) error {
 		return errs.Newf(errs.InvalidArgument, "task %q not found", name)
 	}
 	t := list[i]
+	// 不给口令就跑，等于拿明文归档盖掉原来的密文
+	if t.Encrypted && c.password == "" {
+		return errs.Newf(errs.InvalidArgument, "task %q is encrypted, password is required", t.Name)
+	}
 	if err := tasks.Validate(t); err != nil {
 		return err
 	}
