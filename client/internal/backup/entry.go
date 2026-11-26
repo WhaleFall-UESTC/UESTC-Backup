@@ -28,33 +28,40 @@ type Entry struct {
 	ModTime time.Time   `json:"mod_time"`
 }
 
-// Scan 遍历 root，返回全部子孙节点。不包含 root 自身，不跟随符号链接
-func Scan(root string) ([]Entry, error) {
+// Scan 遍历 root，返回全部子孙节点。不包含 root 自身，不跟随符号链接。
+// 读不了的目录和节点跳过并记进 skips，和打包时跳过的文件用同一种方式报告；只有 root 自身用不了才报错
+func Scan(root string) ([]Entry, []Skip, error) {
 	if err := checkScanRoot(root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return scanFS(os.DirFS(root), root)
+}
 
-	var entries []Entry
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+// scanFS 是 Scan 的主体。文件系统做成参数，是为了能用读不了目录的假文件系统来测
+func scanFS(fsys fs.FS, root string) (entries []Entry, skips []Skip, err error) {
+	err = fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil && name == ".":
 			return err
-		}
-		if path == root {
-			return nil
-		}
-		entry, ok, err := entryOf(root, path, d)
-		if err != nil {
-			return err
-		}
-		if ok {
-			entries = append(entries, entry)
+		case err != nil:
+			skips = append(skips, Skip{Path: name, Err: err})
+			// 读不了的目录自己已经当成一条记录收进来了，它不算备份到了
+			if n := len(entries) - 1; n >= 0 && entries[n].Path == name {
+				entries = entries[:n]
+			}
+		case name != ".":
+			if entry, ok, err := entryOf(root, name, d); err != nil {
+				skips = append(skips, Skip{Path: name, Err: err})
+			} else if ok {
+				entries = append(entries, entry)
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return entries, nil
+	return entries, skips, nil
 }
 
 // checkScanRoot 确认 root 存在且是目录
@@ -69,19 +76,15 @@ func checkScanRoot(root string) error {
 	return nil
 }
 
-// entryOf 把一个目录项转成 Entry；管道、socket 这类备份不了的返回 false
-func entryOf(root, path string, d fs.DirEntry) (Entry, bool, error) {
+// entryOf 把一个目录项转成 Entry，name 是它相对 root 的路径；管道、socket 这类备份不了的返回 false
+func entryOf(root, name string, d fs.DirEntry) (Entry, bool, error) {
 	info, err := d.Info()
-	if err != nil {
-		return Entry{}, false, err
-	}
-	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return Entry{}, false, err
 	}
 
 	entry := Entry{
-		Path:    filepath.ToSlash(rel),
+		Path:    name,
 		Size:    info.Size(),
 		Mode:    info.Mode(),
 		ModTime: info.ModTime(),
@@ -91,7 +94,7 @@ func entryOf(root, path string, d fs.DirEntry) (Entry, bool, error) {
 	case d.Type()&fs.ModeSymlink != 0:
 		entry.Kind = KindSymlink
 		// 符号链接的 Size 取决于目标文件
-		target, err := os.Readlink(path)
+		target, err := os.Readlink(filepath.Join(root, filepath.FromSlash(name)))
 		if err != nil {
 			return Entry{}, false, err
 		}
