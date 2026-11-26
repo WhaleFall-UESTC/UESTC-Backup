@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash"
@@ -33,10 +34,20 @@ func ReadIndex(archive, password string) ([]Record, error) {
 		if rec.Kind != KindFile {
 			return nil
 		}
-		_, err := a.f.Seek(paddedSize(rec.Size), io.SeekCurrent)
-		return err
+		return a.skipData(rec)
 	})
 	return records, err
+}
+
+// Stats 是一次操作覆盖的范围
+type Stats struct {
+	Files int
+	Bytes int64
+}
+
+// VerifyOptions 是校验的可选参数
+type VerifyOptions struct {
+	Progress func(Progress)
 }
 
 // Verify 不写盘，检查整份归档：每个文件的内容和记录里的 CRC64 对不对得上，
@@ -44,29 +55,74 @@ func ReadIndex(archive, password string) ([]Record, error) {
 //
 // 有问题时返回 errs.Corrupted，路径是出问题的文件，看不出是哪个文件时是 archive。
 // 归档不完整时 Err 是 io.ErrUnexpectedEOF；文件打不开时错误原样返回。
-func Verify(archive, password string) error {
+func Verify(ctx context.Context, archive, password string, opts VerifyOptions) error {
 	f, cleanup, err := openArchive(archive, password)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	return verifyArchive(archive, f)
+	_, err = verifyArchive(ctx, archive, f, opts.Progress)
+	return err
 }
-func verifyArchive(path string, f *os.File) error {
+
+// verifyArchive 核对整份归档，顺带数出文件数和总字节数
+func verifyArchive(ctx context.Context, path string, f *os.File, progress func(Progress)) (Stats, error) {
+	stats, err := countIndex(path, f)
+	if err != nil {
+		return Stats{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Stats{}, err
+	}
+
 	a := &archiveReader{path: path, f: f, sum: crc64.New(crcTable)}
-	err := a.readHeader()
+	err = a.readHeader()
+	var doneFiles int
+	var doneBytes int64
 	if err == nil {
 		err = a.each(func(rec Record) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if rec.Kind != KindFile {
 				return nil
 			}
-			return a.checkData(rec)
+			if err := a.checkData(rec); err != nil {
+				return err
+			}
+			doneFiles++
+			doneBytes += rec.Size
+			if progress != nil {
+				progress(Progress{Phase: PhaseVerifying, Path: rec.Path, DoneFiles: doneFiles, TotalFiles: stats.Files, DoneBytes: doneBytes, TotalBytes: stats.Bytes})
+			}
+			return nil
 		})
 	}
 	if err == nil && a.sum.Sum64() != a.crc {
 		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
 	}
-	return err
+	return stats, err
+}
+
+// countIndex 数出文件数和总字节数，只读记录头，不碰数据区。读完文件位置不定
+func countIndex(path string, f *os.File) (Stats, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Stats{}, err
+	}
+	a := &archiveReader{path: path, f: f}
+	if err := a.readHeader(); err != nil {
+		return Stats{}, err
+	}
+	var stats Stats
+	err := a.each(func(rec Record) error {
+		if rec.Kind != KindFile {
+			return nil
+		}
+		stats.Files++
+		stats.Bytes += rec.Size
+		return a.skipData(rec)
+	})
+	return stats, err
 }
 
 // archiveReader 顺序读归档里的记录。sum 不为 nil 时同时算整份归档的校验值。
@@ -160,6 +216,24 @@ func (a *archiveReader) each(fn func(Record) error) error {
 			return err
 		}
 	}
+}
+
+// skipData 跳过一条文件记录的数据区。os.File.Seek 越过文件尾不报错，只拿读不读得到
+// 下一条记录的头分不出读完和截断，所以要拿文件长度卡边界
+func (a *archiveReader) skipData(rec Record) error {
+	info, err := a.f.Stat()
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	pos, err := a.f.Seek(paddedSize(rec.Size), io.SeekCurrent)
+	if err != nil {
+		return errs.Wrap(err, errs.IO).At(rec.Path)
+	}
+	if rec.Size > info.Size() || pos > info.Size() {
+		// incomplete(io.EOF) 即 Err 是 io.ErrUnexpectedEOF，和 checkData 读到半截时的错误一样
+		return incomplete(io.EOF, "data is incomplete").At(rec.Path)
+	}
+	return nil
 }
 
 // checkData 读掉一条文件记录的数据区，核对文件内容的 CRC64。

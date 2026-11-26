@@ -2,6 +2,7 @@ package backup
 
 import (
 	"client/internal/errs"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -122,6 +123,26 @@ func TestReadIndexRejectsTruncatedArchive(t *testing.T) {
 	}
 }
 
+// 截断落在文件的数据区里也要报错：Seek 越过文件尾不报错，只靠读不到下一条记录的头
+// 分不出“读完了”和“被截断了”
+func TestReadIndexRejectsTruncatedData(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a.bin"), string(dataBytes(2048)))
+	raw := packBytes(t, src, []Entry{{Path: "a.bin", Kind: KindFile, Size: 2048}})
+	archive := filepath.Join(t.TempDir(), "cut.dbkp")
+
+	dataStart := layoutHeaderSize + layoutRecordHeaderSize + len("a.bin")
+	for _, n := range []int{dataStart + 1, dataStart + 511, dataStart + 1024, dataStart + 2047} {
+		if err := os.WriteFile(archive, raw[:n], 0o644); err != nil {
+			t.Fatalf("Setup failed: write an archive of %d bytes: %v", n, err)
+		}
+		_, err := ReadIndex(archive, "")
+		if problem := errOn(err, "a.bin", errs.ErrCorrupted); problem != nil {
+			t.Errorf("ReadIndex() on the first %d bytes: %v", n, problem)
+		}
+	}
+}
+
 // 归档是外来数据：记录头里的长度字段坏了，不能让读取方往回跳，也不能让它一次分配几个 GB。
 func TestReadIndexRejectsInvalidRecordHeader(t *testing.T) {
 	src := t.TempDir()
@@ -180,7 +201,7 @@ func TestVerifyAcceptsIntactArchive(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.bin"), string(dataBytes(150_000)))
 
 	for _, archive := range []string{packTree(t, root, scanOK(t, root)), packTree(t, root, nil)} {
-		if err := Verify(archive, ""); err != nil {
+		if err := Verify(context.Background(), archive, "", VerifyOptions{}); err != nil {
 			t.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 		}
 	}
@@ -222,7 +243,7 @@ func TestVerifyRejectsBrokenArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			err := Verify(archive, "")
+			err := Verify(context.Background(), archive, "", VerifyOptions{})
 			if problem := errOn(err, tc.path, tc.want); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}
@@ -255,7 +276,7 @@ func TestVerifyRejectsTruncatedArchive(t *testing.T) {
 				t.Fatalf("Setup failed: write the truncated archive: %v", err)
 			}
 
-			err := Verify(archive, "")
+			err := Verify(context.Background(), archive, "", VerifyOptions{})
 			if problem := errOn(err, tc.path, errs.ErrCorrupted); problem != nil {
 				t.Errorf("Verify(%q): %v", archive, problem)
 			}

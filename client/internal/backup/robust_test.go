@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"client/internal/errs"
@@ -98,7 +99,7 @@ func TestPackContextCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		_, err := Pack(ctx, filepath.Join(dir, "backup.dbkp"), src, entries,
-			PackOptions{Progress: func(_ string, _ int64) { cancel() }})
+			PackOptions{Progress: func(Progress) { cancel() }})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Pack() error = %v, want context.Canceled", err)
 		}
@@ -131,7 +132,7 @@ func TestPackProgressReportsBytes(t *testing.T) {
 	}
 	var got []report
 	_, err := Pack(context.Background(), filepath.Join(t.TempDir(), "x.dbkp"), src, entries,
-		PackOptions{Progress: func(path string, bytes int64) { got = append(got, report{path, bytes}) }})
+		PackOptions{Progress: func(p Progress) { got = append(got, report{p.Path, p.DoneBytes}) }})
 	if err != nil {
 		t.Fatalf("Pack() error = %v, want <nil>", err)
 	}
@@ -189,6 +190,39 @@ func TestPackRejectsArchiveInsideSource(t *testing.T) {
 	})
 }
 
+// 调用方给的 Entry 坏了要报 InvalidArgument，且不留任何归档文件。
+// 归档路径只用 '/' 分隔，反斜杠在 Windows 上是分隔符，混进来还原时会跑错地方。
+func TestPackRejectsInvalidEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		bad  Entry
+	}{
+		{"路径跳出源目录", Entry{Path: "../x", Kind: KindFile, Size: 1}},
+		{"路径是绝对的", Entry{Path: "/x", Kind: KindFile, Size: 1}},
+		{"路径带反斜杠", Entry{Path: `a\b`, Kind: KindFile, Size: 1}},
+		{"路径超过 1 MiB", Entry{Path: strings.Repeat("a", maxPathBytes+1), Kind: KindFile, Size: 1}},
+		{"Kind 是零值", Entry{Path: "x", Kind: 0}},
+		{"Kind 不认识", Entry{Path: "x", Kind: Kind(9)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			writeFile(t, filepath.Join(src, "ok.txt"), "aaa")
+			entries := append(scanOK(t, src), tc.bad)
+
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "backup.dbkp")
+			_, err := Pack(context.Background(), dst, src, entries, PackOptions{})
+			if problem := errOn(err, tc.bad.Path, errs.ErrInvalidArgument); problem != nil {
+				t.Errorf("Pack() %v", problem)
+			}
+			if problem := checkNothingLeft(dir); problem != nil {
+				t.Errorf("Pack() %v", problem)
+			}
+		})
+	}
+}
+
 // 成功后不留临时文件；再打一次覆盖已有归档。
 func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	dir := t.TempDir()
@@ -211,7 +245,7 @@ func TestPackTemporaryFileIsRenamed(t *testing.T) {
 	if _, err := Pack(context.Background(), dst, src, scanOK(t, src), PackOptions{}); err != nil {
 		t.Errorf("Pack() over an existing archive: error = %v, want <nil>", err)
 	}
-	if err := Verify(dst, ""); err != nil {
+	if err := Verify(context.Background(), dst, "", VerifyOptions{}); err != nil {
 		t.Errorf("Verify(%q) = %v, want <nil>", dst, err)
 	}
 }
@@ -227,7 +261,7 @@ func checkArchiveOnlyHas(archive, want string) error {
 	if len(records) != 1 || records[0].Path != want {
 		return fmt.Errorf("ReadIndex() = %v, want only %q", records, want)
 	}
-	if err := Verify(archive, ""); err != nil {
+	if err := Verify(context.Background(), archive, "", VerifyOptions{}); err != nil {
 		return fmt.Errorf("Verify(%q) = %v, want <nil>", archive, err)
 	}
 	return nil

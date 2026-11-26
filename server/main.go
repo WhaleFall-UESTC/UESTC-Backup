@@ -1,4 +1,4 @@
-package server
+package main
 
 import (
 	"log"
@@ -21,5 +21,5 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("Starting server on :8080")
-	http.ListenAndServe(":8080", newRouter(store))
+	log.Fatal(http.ListenAndServe(":8080", newRouter(store)))
 }

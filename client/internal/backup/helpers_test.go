@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"client/internal/errs"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -78,6 +81,31 @@ func rewrittenArchive(t *testing.T, change func(raw []byte)) string {
 	return archive
 }
 
+// forgedRecord 拼一条伪造的记录。Pack 会拒绝这样的 Entry，只能直接拼字节，
+// 用来测读取方对伪造记录的防御
+func forgedRecord(path string, kind byte) []byte {
+	rec := make([]byte, layoutRecordHeaderSize+len(path))
+	rec[0] = kind
+	binary.LittleEndian.PutUint32(rec[28:], uint32(len(path)))
+	copy(rec[layoutRecordHeaderSize:], path)
+	return rec
+}
+
+// forgedArchive 拼一份带单条伪造记录的归档，公共头同空归档
+func forgedArchive(t *testing.T, path string, kind byte) string {
+	raw := make([]byte, layoutHeaderSize)
+	copy(raw[0:layoutMagicSize], archiveMagic)
+	binary.LittleEndian.PutUint16(raw[layoutVersionOffset:], archiveVersion)
+	binary.LittleEndian.PutUint64(raw[layoutDataOffset:], uint64(layoutHeaderSize))
+	raw = append(raw, forgedRecord(path, kind)...)
+
+	archive := filepath.Join(t.TempDir(), "forged.dbkp")
+	if err := os.WriteFile(archive, raw, 0o644); err != nil {
+		t.Fatalf("Setup failed: write the archive: %v", err)
+	}
+	return archive
+}
+
 // errOn 检查引擎对某个文件报的错：errors.Is 能认出 want，包在 *errs.Error 里，Path 就是这个文件，
 // 并且不匹配 io.EOF（调用方把它当成正常结束）。有问题时返回一句说明。
 func errOn(err error, path string, want error) error {
@@ -114,11 +142,11 @@ func diffRecords(got []Record, want []Entry) error {
 // 文件的内容要逐字节相同，文件的修改时间要一致。
 // 目录的修改时间不比：往目录里建文件会更新它，这一步不恢复。返回第一处不一致的说明。
 func diffTree(src, dst string) error {
-	want, err := Scan(src)
+	want, _, err := Scan(src)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", src, err)
 	}
-	got, err := Scan(dst)
+	got, _, err := Scan(dst)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", dst, err)
 	}
@@ -166,9 +194,50 @@ func entryNames(t *testing.T, dir string) []string {
 	return names
 }
 
+// failingRecords 造出两条还原时必然失败的记录：fail 是文件，fail/child 在它下面建不出来
+func failingRecords(t *testing.T, src string) []Entry {
+	t.Helper()
+	writeFile(t, filepath.Join(src, "fail", "child"), "")
+	return []Entry{
+		{Path: "fail", Kind: KindFile, Size: 0},
+		{Path: "fail/child", Kind: KindFile, Size: 0},
+	}
+}
+
+// junction 创建指向 target 的目录联接；Windows 之外或者创建不了时跳过测试
+func junction(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("junction only exists on Windows")
+	}
+	if _, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Skipf("cannot create junction: %v", err)
+	}
+	// 清理按注册的逆序执行：这条先于目录的清理，只删联接本身
+	t.Cleanup(func() { _ = os.Remove(link) })
+}
+
 // layoutPaddedSize 是 n 个字节的数据区在归档里占的字节数：补零到 512 的整数倍。
 func layoutPaddedSize(n int64) int64 {
 	return (n + 511) / 512 * 512
+}
+
+// testIterations 是测试里口令派生的迭代次数，取小值省时间
+const testIterations = 1000
+
+// TestMain 把口令派生的迭代次数换成测试用的小值，
+// 暂存目录换成测试专用的临时目录，不碰真实的用户缓存
+func TestMain(m *testing.M) {
+	kdfIterations = testIterations
+	dir, err := os.MkdirTemp("", "dbkp-staging-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	stagingRoot = func() (string, error) { return dir, nil }
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 // dataBytes 生成 n 个确定的字节。

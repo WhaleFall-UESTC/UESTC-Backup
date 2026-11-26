@@ -8,18 +8,34 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
+	"time"
 
 	"client/internal/backup"
 	"client/internal/errs"
 )
 
 const usage = `用法:
-  backup pack [-algo none|lz77|huffman] [-password 口令] <源目录> <归档>
-  backup unpack [-password 口令] <归档> <目标目录>
-  backup verify [-password 口令] <归档>
+  backup pack [-algo none|lz77|huffman] [-password 口令] [-progress=false] <源目录> <归档>
+  backup unpack [-password 口令] [-progress=false] [-on-conflict fail|overwrite|skip|rename] <归档> <目标目录>
+  backup verify [-password 口令] [-progress=false] <归档>
+  backup task add -name 名称 -source 源目录 -dest 归档 [-algo none|lz77|huffman] [-config tasks.json]
+  backup task list [-config tasks.json]
+  backup task remove [-config tasks.json] <名称>
+  backup task run [-config tasks.json] [-password 口令] [-progress=false] <名称>
 
 -algo 默认 lz77，压完不比原样小就改存原样
--password 不为空时加密归档，还原和校验要提供同一个口令`
+-password 不为空时加密归档，还原和校验要提供同一个口令；给口令更建议 -password-file，免得进 shell 历史和进程列表
+-progress 默认开启，把进度打到标准错误输出
+-on-conflict 默认 fail，目标目录非空就拒绝
+任务文件默认是当前目录的 tasks.json，口令不存进去`
+
+var conflicts = map[string]backup.Conflict{
+	"fail":      backup.ConflictFail,
+	"overwrite": backup.ConflictOverwrite,
+	"skip":      backup.ConflictSkip,
+	"rename":    backup.ConflictRename,
+}
 
 var algorithms = map[string]backup.Algorithm{
 	"none":    backup.AlgorithmNone,
@@ -31,8 +47,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	// 清扫是顺手的事，失败了不影响本次操作
+	if err := backup.SweepStaging(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+	}
+	if err := run(ctx, os.Args[1:]); err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "已取消")
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(exitCode(err))
 	}
 }
@@ -45,9 +69,11 @@ func run(ctx context.Context, args []string) error {
 	case "pack":
 		return runPack(ctx, args[1:])
 	case "unpack":
-		return runUnpack(args[1:])
+		return runUnpack(ctx, args[1:])
 	case "verify":
-		return runVerify(args[1:])
+		return runVerify(ctx, args[1:])
+	case "task":
+		return runTask(ctx, args[1:])
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
@@ -61,97 +87,173 @@ func usageErr(format string, args ...any) error {
 }
 
 func runPack(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
-	flags.SetOutput(io.Discard) // 错误和用法由 usageErr 一起打印
-	algoName := flags.String("algo", "lz77", "压缩算法：none、lz77、huffman")
-	password := flags.String("password", "", "口令，不为空时加密归档")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Println(usage)
-			return nil
-		}
-		return usageErr("%v", err)
+	c := newCommonFlags("pack")
+	algoName := c.fs.String("algo", "lz77", "压缩算法：none、lz77、huffman")
+	if err := c.parse(args); errors.Is(err, flag.ErrHelp) {
+		return nil
+	} else if err != nil {
+		return err
 	}
-	if flags.NArg() != 2 {
+	if c.fs.NArg() != 2 {
 		return usageErr("pack 需要两个参数：<源目录> <归档>")
 	}
 	algo, ok := algorithms[*algoName]
 	if !ok {
 		return usageErr("未知算法 %q", *algoName)
 	}
-	src, dst := flags.Arg(0), flags.Arg(1)
+	src, dst := c.fs.Arg(0), c.fs.Arg(1)
 
-	entries, err := backup.Scan(src)
+	entries, scanSkips, err := backup.Scan(src)
 	if err != nil {
 		return err
 	}
-	opts := backup.PackOptions{Algorithm: algo, Password: *password}
+	opts := backup.PackOptions{Algorithm: algo, Password: c.password, Progress: progressPrinter(c.progress)}
 	skips, err := backup.Pack(ctx, dst, src, entries, opts)
 	if err != nil {
 		return err
 	}
+	reportSkips(scanSkips)
+	reportSkips(skips)
+	fmt.Printf("已打包 %d 个节点到 %s（算法 %s），跳过 %d 个\n",
+		len(entries)-len(skips), dst, *algoName, len(scanSkips)+len(skips))
+	if c.password != "" {
+		fmt.Println("归档已加密")
+	}
+	// 跳过是备份不完整，退出码要说出来，定时任务才能察觉
+	if n := len(scanSkips) + len(skips); n > 0 {
+		return errs.Newf(errs.PartialBackup, "%d files skipped", n)
+	}
+	return nil
+}
+
+// reportSkips 把扫描和打包时跳过的节点打到标准错误输出
+func reportSkips(skips []backup.Skip) {
 	for _, s := range skips {
 		fmt.Fprintf(os.Stderr, "跳过 %s: %v\n", s.Path, s.Err)
 	}
-	fmt.Printf("已打包 %d 个节点到 %s（算法 %s），跳过 %d 个\n", len(entries)-len(skips), dst, *algoName, len(skips))
-	if *password != "" {
-		fmt.Println("归档已加密")
-	}
-	return nil
 }
 
-func runUnpack(args []string) error {
-	flags, password, err := passwordFlags("unpack", args)
-	if errors.Is(err, flag.ErrHelp) {
+func runUnpack(ctx context.Context, args []string) error {
+	c := newCommonFlags("unpack")
+	conflictName := c.fs.String("on-conflict", "fail", "遇到已有文件的处理：fail、overwrite、skip、rename")
+	if err := c.parse(args); errors.Is(err, flag.ErrHelp) {
 		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
 	}
-	if flags.NArg() != 2 {
+	if c.fs.NArg() != 2 {
 		return usageErr("unpack 需要两个参数：<归档> <目标目录>")
 	}
-	if err := backup.Unpack(flags.Arg(0), flags.Arg(1), *password); err != nil {
-		return err
+	conflict, ok := conflicts[*conflictName]
+	if !ok {
+		return usageErr("未知冲突策略 %q", *conflictName)
 	}
-	fmt.Printf("已还原到 %s\n", flags.Arg(1))
-	return nil
-}
 
-func runVerify(args []string) error {
-	flags, password, err := passwordFlags("verify", args)
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
-	}
+	opts := backup.UnpackOptions{Conflict: conflict, Progress: progressPrinter(c.progress)}
+	result, err := backup.Unpack(ctx, c.fs.Arg(0), c.fs.Arg(1), c.password, opts)
 	if err != nil {
 		return err
 	}
-	if flags.NArg() != 1 {
-		return usageErr("verify 需要一个参数：<归档>")
-	}
-	if err := backup.Verify(flags.Arg(0), *password); err != nil {
-		return err
-	}
-	fmt.Printf("%s 校验通过\n", flags.Arg(0))
+	fmt.Printf("已还原 %d 个文件到 %s，跳过 %d 个，改名 %d 个\n", result.Restored, c.fs.Arg(1), result.Skipped, result.Renamed)
 	return nil
 }
 
-// passwordFlags 解析 unpack、verify 共用的 -password；-h 已经按用法打印过
-func passwordFlags(name string, args []string) (*flag.FlagSet, *string, error) {
-	flags := flag.NewFlagSet(name, flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	password := flags.String("password", "", "口令，加密归档要提供")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Println(usage)
-			return nil, nil, flag.ErrHelp
-		}
-		return nil, nil, usageErr("%v", err)
+func runVerify(ctx context.Context, args []string) error {
+	c := newCommonFlags("verify")
+	if err := c.parse(args); errors.Is(err, flag.ErrHelp) {
+		return nil
+	} else if err != nil {
+		return err
 	}
-	return flags, password, nil
+	if c.fs.NArg() != 1 {
+		return usageErr("verify 需要一个参数：<归档>")
+	}
+	opts := backup.VerifyOptions{Progress: progressPrinter(c.progress)}
+	if err := backup.Verify(ctx, c.fs.Arg(0), c.password, opts); err != nil {
+		return err
+	}
+	fmt.Printf("%s 校验通过\n", c.fs.Arg(0))
+	return nil
 }
 
+// commonFlags 是三个子命令共用的选项
+type commonFlags struct {
+	fs           *flag.FlagSet
+	password     string
+	passwordFile string
+	progress     bool
+}
+
+func newCommonFlags(name string) *commonFlags {
+	c := &commonFlags{fs: flag.NewFlagSet(name, flag.ContinueOnError)}
+	c.fs.SetOutput(io.Discard) // 错误和用法由 usageErr 一起打印
+	c.fs.StringVar(&c.password, "password", "", "口令，加密归档要提供")
+	c.fs.StringVar(&c.passwordFile, "password-file", "", "从文件读口令，行尾换行不算")
+	c.fs.BoolVar(&c.progress, "progress", true, "把进度打到标准错误输出")
+	return c
+}
+
+// parse 解析选项；-h 已经按用法打印过
+func (c *commonFlags) parse(args []string) error {
+	if err := c.fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Println(usage)
+			return flag.ErrHelp
+		}
+		return usageErr("%v", err)
+	}
+	if c.password != "" && c.passwordFile != "" {
+		return usageErr("-password 和 -password-file 只能给一个")
+	}
+	if c.passwordFile != "" {
+		data, err := os.ReadFile(c.passwordFile)
+		if err != nil {
+			return err
+		}
+		c.password = strings.TrimRight(string(data), "\r\n")
+	}
+	return nil
+}
+
+// progressPrinter 把进度刷到标准错误输出，同一个阶段原地覆盖。
+// 行变短时补空格盖掉上一行的尾巴，不然长路径换成短路径会留下残字
+func progressPrinter(enabled bool) func(backup.Progress) {
+	if !enabled {
+		return nil
+	}
+	var lastAt time.Time
+	var lastLen int
+	return func(p backup.Progress) {
+		if p.TotalFiles == 0 {
+			fmt.Fprintf(os.Stderr, "%s…\n", p.Phase)
+			lastLen = 0
+			return
+		}
+		if p.DoneFiles < p.TotalFiles && time.Since(lastAt) < 100*time.Millisecond {
+			return
+		}
+		lastAt = time.Now()
+		line := fmt.Sprintf("%s %s %d/%d 个文件 %.1f/%.1f MB",
+			p.Phase, p.Path, p.DoneFiles, p.TotalFiles, megabytes(p.DoneBytes), megabytes(p.TotalBytes))
+		if pad := lastLen - len(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		lastLen = len(line)
+		fmt.Fprintf(os.Stderr, "\r%s", line)
+		if p.DoneFiles == p.TotalFiles {
+			fmt.Fprintln(os.Stderr)
+			lastLen = 0
+		}
+	}
+}
+
+// megabytes 把字节数换成 MB，进度显示用
+func megabytes(n int64) float64 { return float64(n) / (1 << 20) }
+
 func exitCode(err error) int {
+	if errors.Is(err, context.Canceled) {
+		return 130
+	}
 	var e *errs.Error
 	if errors.As(err, &e) {
 		return int(e.Code)
