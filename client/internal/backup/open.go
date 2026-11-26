@@ -153,7 +153,14 @@ func decryptArchive(f *os.File, path, password string, h header, stage *staging)
 		return header{}, nil, err
 	}
 	inner, err := readHeader(plain, path)
-	return inner, plain, err
+	if err != nil {
+		return header{}, nil, err
+	}
+	// 读头把位置推进了，调用方还要从头读一遍内层归档
+	if _, err := plain.Seek(0, io.SeekStart); err != nil {
+		return header{}, nil, err
+	}
+	return inner, plain, nil
 }
 
 // unseal 核对口令，再核对存盘字节的 CRC64 和认证标签，都过了才交出这份归档的密钥
