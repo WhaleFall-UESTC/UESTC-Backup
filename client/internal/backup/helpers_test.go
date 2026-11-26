@@ -222,6 +222,24 @@ func layoutPaddedSize(n int64) int64 {
 	return (n + 511) / 512 * 512
 }
 
+// testIterations 是测试里口令派生的迭代次数，取小值省时间
+const testIterations = 1000
+
+// TestMain 把口令派生的迭代次数换成测试用的小值，
+// 暂存目录换成测试专用的临时目录，不碰真实的用户缓存
+func TestMain(m *testing.M) {
+	kdfIterations = testIterations
+	dir, err := os.MkdirTemp("", "dbkp-staging-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	stagingRoot = func() (string, error) { return dir, nil }
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // dataBytes 生成 n 个确定的字节。
 func dataBytes(n int) []byte {
 	b := make([]byte, n)
