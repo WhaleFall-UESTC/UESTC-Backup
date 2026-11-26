@@ -253,3 +253,75 @@ func TestRestoreJobRestoresWholeArchive(t *testing.T) {
 		}
 	}
 }
+
+// 作业进行中再起备份、校验、还原都被拒，类别是 JobBusy；作业结束后能再起
+func TestSecondJobRejectedWhileRunning(t *testing.T) {
+	useTempConfig(t)
+	task := addBackupTask(t, "a", flatSource(t, 3000), "none", "")
+	id, err := StartBackup(task.Name, "")
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+
+	addBackupTask(t, "b", flatSource(t, 1), "none", "")
+	if _, err := StartBackup("b", ""); !errors.Is(err, errs.ErrJobBusy) {
+		t.Errorf("second StartBackup: error = %v, want errs.ErrJobBusy", err)
+	}
+	if _, err := StartVerify(task.Destination, ""); !errors.Is(err, errs.ErrJobBusy) {
+		t.Errorf("StartVerify while running: error = %v, want errs.ErrJobBusy", err)
+	}
+	if _, err := StartRestore(task.Destination, t.TempDir(), "", backup.ConflictSkip); !errors.Is(err, errs.ErrJobBusy) {
+		t.Errorf("StartRestore while running: error = %v, want errs.ErrJobBusy", err)
+	}
+
+	if err := Cancel(id); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	waitState(t, id)
+
+	// 任务 a 被取消，归档没落盘，这次校验会失败，但说明忙检查已经解除
+	id2, err := StartVerify(task.Destination, "")
+	if err != nil {
+		t.Fatalf("StartVerify after cancel: error = %v, want nil", err)
+	}
+	if s := waitState(t, id2); s.State != StateFailed {
+		t.Errorf("verify State = %q, want %q", s.State, StateFailed)
+	}
+}
+
+// 同一阶段内 DoneFiles 不回退，相邻两条进度至少隔 100 毫秒，结束帧的计数走到头
+func TestProgressThrottledAndMonotonic(t *testing.T) {
+	id, _ := startBackup(t, flatSource(t, 3000), "")
+
+	ch, unsub := collectEvents(128)
+	defer unsub()
+	s := waitState(t, id)
+	time.Sleep(150 * time.Millisecond)
+
+	evs := drainEvents(ch)
+	for i := 1; i < len(evs); i++ {
+		prev, e := evs[i-1], evs[i]
+		if e.snap.State != StateRunning || prev.snap.State != StateRunning || e.snap.Phase != prev.snap.Phase {
+			continue
+		}
+		if e.snap.DoneFiles < prev.snap.DoneFiles {
+			t.Errorf("DoneFiles went back: %d after %d in phase %s", e.snap.DoneFiles, prev.snap.DoneFiles, e.snap.Phase)
+		}
+		if gap := e.at.Sub(prev.at); gap < progressInterval {
+			t.Errorf("two progress events %v apart in phase %s, want at least %v", gap, e.snap.Phase, progressInterval)
+		}
+	}
+
+	packing := 0
+	for _, e := range evs {
+		if e.snap.State == StateRunning && e.snap.Phase == "打包" {
+			packing++
+		}
+	}
+	if packing < 2 {
+		t.Fatalf("got %d packing events, want at least 2", packing)
+	}
+	if s.DoneFiles != 3000 || s.TotalFiles != 3000 || s.Result.Files != 3000 {
+		t.Errorf("final = %d/%d files, Result = %+v, want 3000", s.DoneFiles, s.TotalFiles, s.Result)
+	}
+}

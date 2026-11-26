@@ -24,6 +24,9 @@ const (
 	StateCancelled = "cancelled"
 )
 
+// progressInterval 是同一阶段两条进度事件的最小间隔，和命令行的节流一致
+const progressInterval = 100 * time.Millisecond
+
 // SkipInfo 是一条被跳过的节点和原因
 type SkipInfo struct {
 	Path   string `json:"path"`
@@ -205,10 +208,16 @@ func runVerify(ctx context.Context, archive, password string, emit func(backup.P
 	return &Result{Files: last.DoneFiles, Bytes: last.DoneBytes}, nil
 }
 
-// start 登记一个作业并让它在自己的 goroutine 里跑，返回作业号
+// start 登记一个作业并让它在自己的 goroutine 里跑，返回作业号。
+// 同一时间只跑一个作业：归档被读着的时候，Windows 上备份最后一步的改名覆盖会失败
 func start(kind, taskName string, exec func(ctx context.Context, emit func(backup.Progress)) (*Result, error)) (string, error) {
 	jobsMu.Lock()
 	defer jobsMu.Unlock()
+	for _, other := range jobs {
+		if other.state == StateRunning {
+			return "", errs.Newf(errs.JobBusy, "job %s is still running", other.id)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	nextJobID++
 	j := &job{
@@ -223,17 +232,26 @@ func start(kind, taskName string, exec func(ctx context.Context, emit func(backu
 	return j.id, nil
 }
 
-// runJob 在自己的 goroutine 里跑作业：进度发给订阅者，结束时定状态、留结果、发最后一帧
+// runJob 在自己的 goroutine 里跑作业：进度经节流发给订阅者，结束时定状态、留结果、发最后一帧
 func runJob(ctx context.Context, j *job, exec func(ctx context.Context, emit func(backup.Progress)) (*Result, error)) {
 	defer j.cancel()
 	started := time.Now()
 
+	var lastPhase backup.Phase
+	var lastEmit time.Time
 	emit := func(p backup.Progress) {
 		jobsMu.Lock()
-		j.prog = p
-		snap := j.snapshotValue()
+		j.prog = p // 查询永远拿到最新进度，节流只管发布
+		var snap Snapshot
+		send := p.Phase != lastPhase || time.Since(lastEmit) >= progressInterval
+		if send {
+			lastPhase, lastEmit = p.Phase, time.Now()
+			snap = j.snapshotValue()
+		}
 		jobsMu.Unlock()
-		publish(snap)
+		if send {
+			publish(snap)
+		}
 	}
 
 	result, err := exec(ctx, emit)
