@@ -28,14 +28,14 @@ func flatSource(t *testing.T, n int) string {
 	return dir
 }
 
-// addBackupTask 把一条指向 src 的任务写进任务文件并返回它，要先跑过 useTempConfig
-func addBackupTask(t *testing.T, name, src, algo, password string) tasks.Task {
+// addBackupTask 把一条不压缩的任务写进任务文件并返回它，要先跑过 useTempConfig
+func addBackupTask(t *testing.T, name, src, password string) tasks.Task {
 	t.Helper()
 	task := tasks.Task{
 		Name:        name,
 		Source:      src,
 		Destination: filepath.Join(t.TempDir(), name+".dbkp"),
-		Algorithm:   algo,
+		Algorithm:   "none",
 		Encrypted:   password != "",
 	}
 	if err := AddTask(task); err != nil {
@@ -48,7 +48,7 @@ func addBackupTask(t *testing.T, name, src, algo, password string) tasks.Task {
 func startBackup(t *testing.T, src, password string) (string, tasks.Task) {
 	t.Helper()
 	useTempConfig(t)
-	task := addBackupTask(t, "t", src, "none", password)
+	task := addBackupTask(t, "t", src, password)
 	id, err := StartBackup(task.Name, password)
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
@@ -257,13 +257,13 @@ func TestRestoreJobRestoresWholeArchive(t *testing.T) {
 // 作业进行中再起备份、校验、还原都被拒，类别是 JobBusy；作业结束后能再起
 func TestSecondJobRejectedWhileRunning(t *testing.T) {
 	useTempConfig(t)
-	task := addBackupTask(t, "a", flatSource(t, 3000), "none", "")
+	task := addBackupTask(t, "a", flatSource(t, 3000), "")
 	id, err := StartBackup(task.Name, "")
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
 	}
 
-	addBackupTask(t, "b", flatSource(t, 1), "none", "")
+	addBackupTask(t, "b", flatSource(t, 1), "")
 	if _, err := StartBackup("b", ""); !errors.Is(err, errs.ErrJobBusy) {
 		t.Errorf("second StartBackup: error = %v, want errs.ErrJobBusy", err)
 	}
@@ -342,5 +342,47 @@ func TestProgressMonotonic(t *testing.T) {
 
 	if s.DoneFiles != 3000 || s.TotalFiles != 3000 || s.Result.Files != 3000 {
 		t.Errorf("final = %d/%d files, Result = %+v, want 3000", s.DoneFiles, s.TotalFiles, s.Result)
+	}
+}
+
+// Snapshots 按启动顺序返回全部作业，状态跟着作业走，界面重载后靠它恢复
+func TestSnapshotsListsAllJobs(t *testing.T) {
+	useTempConfig(t)
+	jobsMu.Lock()
+	jobs = map[string]*job{}
+	jobsMu.Unlock()
+
+	task := addBackupTask(t, "a", flatSource(t, 3000), "")
+	first, err := StartBackup(task.Name, "")
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+	if snaps := Snapshots(); len(snaps) != 1 || snaps[0].ID != first || snaps[0].State != StateRunning {
+		t.Errorf("Snapshots() while running = %+v, want one running job %s", snaps, first)
+	}
+
+	if err := Cancel(first); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	waitState(t, first)
+
+	secondTask := addBackupTask(t, "b", flatSource(t, 1), "")
+	second, err := StartBackup(secondTask.Name, "")
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+	if s := waitState(t, second); s.State != StateDone {
+		t.Fatalf("State = %q, want %q", s.State, StateDone)
+	}
+
+	snaps := Snapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("Snapshots() = %+v, want 2 jobs", snaps)
+	}
+	if snaps[0].ID != first || snaps[0].State != StateCancelled {
+		t.Errorf("Snapshots()[0] = %+v, want cancelled job %s", snaps[0], first)
+	}
+	if snaps[1].ID != second || snaps[1].State != StateDone {
+		t.Errorf("Snapshots()[1] = %+v, want done job %s", snaps[1], second)
 	}
 }
