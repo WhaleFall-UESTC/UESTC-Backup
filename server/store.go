@@ -48,10 +48,13 @@ func (s *Store) Put(r io.Reader, name string) (Meta, error) {
 	return Meta{}, nil
 }
 
+// List 返回全部元数据的副本，调用方改动不影响仓库内部
 func (s *Store) List() []Meta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.metas
+	out := make([]Meta, len(s.metas))
+	copy(out, s.metas)
+	return out
 }
 
 func (s *Store) Open(id string) (*Meta, *os.File, error) {

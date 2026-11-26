@@ -34,3 +34,17 @@ func TestNewStoreLoadsMeta(t *testing.T) {
 		t.Errorf("List() = %v, want the one stored meta", got)
 	}
 }
+
+// List 返回的切片不能是内部的：调用方改它不该影响下一次 List
+func TestListReturnsACopy(t *testing.T) {
+	s := &Store{metas: []Meta{{ID: "abc"}}}
+
+	got := s.List()
+	got[0].ID = "tampered"
+	got = append(got, Meta{ID: "extra"})
+
+	again := s.List()
+	if len(again) != 1 || again[0].ID != "abc" {
+		t.Errorf("List() = %v after the caller mutated the first copy, want the untouched meta", again)
+	}
+}
