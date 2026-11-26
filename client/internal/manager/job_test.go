@@ -1,0 +1,197 @@
+package manager
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"client/internal/tasks"
+)
+
+// flatSource 造一个有 n 个小文件的源目录，文件名排序稳定
+func flatSource(t *testing.T, n int) string {
+	t.Helper()
+	dir := t.TempDir()
+	for i := 0; i < n; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("f%04d.txt", i))
+		if err := os.WriteFile(name, []byte("data"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+// addBackupTask 把一条指向 src 的任务写进任务文件并返回它，要先跑过 useTempConfig
+func addBackupTask(t *testing.T, name, src, algo, password string) tasks.Task {
+	t.Helper()
+	task := tasks.Task{
+		Name:        name,
+		Source:      src,
+		Destination: filepath.Join(t.TempDir(), name+".dbkp"),
+		Algorithm:   algo,
+		Encrypted:   password != "",
+	}
+	if err := AddTask(task); err != nil {
+		t.Fatalf("AddTask(%s) error = %v", name, err)
+	}
+	return task
+}
+
+// startBackup 造一个独立的配置目录、一条任务并起备份作业，返回作业号和任务；压缩算法固定不压缩
+func startBackup(t *testing.T, src, password string) (string, tasks.Task) {
+	t.Helper()
+	useTempConfig(t)
+	task := addBackupTask(t, "t", src, "none", password)
+	id, err := StartBackup(task.Name, password)
+	if err != nil {
+		t.Fatalf("StartBackup() error = %v", err)
+	}
+	return id, task
+}
+
+// waitState 轮询到作业不再是 running，超时 30 秒
+func waitState(t *testing.T, id string) Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		s, err := GetJob(id)
+		if err != nil {
+			t.Fatalf("GetJob(%s) error = %v", id, err)
+		}
+		if s.State != StateRunning {
+			return s
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("job %s is still running after 30s", id)
+	return Snapshot{}
+}
+
+// event 是订阅回调收到的一条记录，at 用来量节流间隔
+type event struct {
+	at   time.Time
+	snap Snapshot
+}
+
+// collectEvents 订阅作业事件攒进 channel，返回 channel 和退订函数
+func collectEvents(buffer int) (<-chan event, func()) {
+	ch := make(chan event, buffer)
+	return ch, Subscribe(func(s Snapshot) { ch <- event{at: time.Now(), snap: s} })
+}
+
+// waitForEvent 等到一条满足 cond 的事件，超时 10 秒
+func waitForEvent(t *testing.T, ch <-chan event, cond func(event) bool) event {
+	t.Helper()
+	for {
+		select {
+		case e := <-ch:
+			if cond(e) {
+				return e
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("waited 10s for an event")
+			return event{}
+		}
+	}
+}
+
+// drainEvents 把 channel 里已经到位的事件取出来，不等新的
+func drainEvents(ch <-chan event) []event {
+	var out []event
+	for {
+		select {
+		case e := <-ch:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// 备份跑完状态是 done，结果里的文件数和源目录一致，归档落在目标位置，结束事件最后到
+func TestBackupJobFinishes(t *testing.T) {
+	src := flatSource(t, 3)
+	id, task := startBackup(t, src, "")
+
+	ch, unsub := collectEvents(16)
+	defer unsub()
+	s := waitState(t, id)
+	time.Sleep(100 * time.Millisecond) // 结束事件的回调可能还在路上
+
+	if s.State != StateDone {
+		t.Fatalf("State = %q, want %q", s.State, StateDone)
+	}
+	if s.Result == nil {
+		t.Fatal("State is done but Result is nil")
+	}
+	if s.Result.Code != 0 || s.Result.Files != 3 || s.Result.Skipped != 0 {
+		t.Errorf("Result = %+v, want code 0, 3 files, no skips", s.Result)
+	}
+	if s.DoneFiles != 3 || s.TotalFiles != 3 {
+		t.Errorf("DoneFiles/TotalFiles = %d/%d, want 3/3", s.DoneFiles, s.TotalFiles)
+	}
+	if _, err := os.Stat(task.Destination); err != nil {
+		t.Errorf("Stat(%s) error = %v", task.Destination, err)
+	}
+
+	evs := drainEvents(ch)
+	if len(evs) == 0 {
+		t.Fatal("no events received")
+	}
+	if last := evs[len(evs)-1].snap; last.State != StateDone || last.ID != id {
+		t.Errorf("last event = %+v, want the done snapshot of job %s", last, id)
+	}
+}
+
+// 跑到一半取消，状态是 cancelled，目标目录不留半截归档
+func TestCancelBackupJob(t *testing.T) {
+	src := flatSource(t, 3000)
+	id, task := startBackup(t, src, "")
+
+	ch, unsub := collectEvents(4096)
+	defer unsub()
+	waitForEvent(t, ch, func(e event) bool { return e.snap.DoneFiles > 0 })
+
+	if err := Cancel(id); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	s := waitState(t, id)
+	if s.State != StateCancelled {
+		t.Fatalf("State = %q, want %q", s.State, StateCancelled)
+	}
+	if s.Result != nil {
+		t.Errorf("cancelled job has Result %+v, want nil", s.Result)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(task.Destination))
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("destination keeps half-written file %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(task.Destination); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(%s) after cancel = %v, want not exist", task.Destination, err)
+	}
+}
+
+// 退订之后不再收到这个作业的任何事件
+func TestUnsubscribeStopsEvents(t *testing.T) {
+	ch, unsub := collectEvents(8)
+	unsub()
+
+	id, _ := startBackup(t, flatSource(t, 3), "")
+	waitState(t, id)
+	time.Sleep(150 * time.Millisecond)
+
+	if evs := drainEvents(ch); len(evs) != 0 {
+		t.Errorf("got %d events after unsubscribe, want 0", len(evs))
+	}
+}
