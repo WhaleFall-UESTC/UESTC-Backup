@@ -32,3 +32,6 @@ coverage.out
 .env.local
 .DS_Store
 Thumbs.db
+
+# 在仓库根跑 task add 生成的任务文件
+tasks.json
