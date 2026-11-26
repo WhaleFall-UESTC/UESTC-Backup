@@ -116,11 +116,11 @@ func diffRecords(got []Record, want []Entry) error {
 // 文件的内容要逐字节相同，文件的修改时间要一致。
 // 目录的修改时间不比：往目录里建文件会更新它，这一步不恢复。返回第一处不一致的说明。
 func diffTree(src, dst string) error {
-	want, err := Scan(src)
+	want, _, err := Scan(src)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", src, err)
 	}
-	got, err := Scan(dst)
+	got, _, err := Scan(dst)
 	if err != nil {
 		return fmt.Errorf("Scan(%q): %v", dst, err)
 	}

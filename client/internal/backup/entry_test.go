@@ -93,7 +93,7 @@ func TestScanRejectsBadRoot(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Scan(tc.root)
+			_, _, err := Scan(tc.root)
 			if err == nil {
 				t.Fatalf("Scan(%q) error = nil, want an error", tc.root)
 			}
@@ -202,14 +202,90 @@ func TestFileCRC64MissingFile(t *testing.T) {
 	}
 }
 
+// 读不了的目录和节点跳过并报告，其余的照常出现；只有 root 自身读不了才报错。
+// 做法是给真实的文件系统套一层，让指定的路径报权限错误
+func TestScanSkipsUnreadableNodes(t *testing.T) {
+	root := sampleTree(t)
+	writeFile(t, filepath.Join(root, "secret", "s.txt"), "s")
+
+	tests := []struct {
+		name   string
+		broken unreadableFS
+		skip   string // 应该出现在跳过清单里的路径
+		fails  bool   // Scan 自身该不该报错
+	}{
+		{name: "目录读不了", broken: unreadableFS{dir: "secret"}, skip: "secret"},
+		{name: "节点的信息读不了", broken: unreadableFS{entry: "a.txt"}, skip: "a.txt"},
+		{name: "根目录读不了", broken: unreadableFS{dir: "."}, fails: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.broken.ReadDirFS = os.DirFS(root).(fs.ReadDirFS)
+			entries, skips, err := scanFS(tc.broken, root)
+			if tc.fails {
+				if !errors.Is(err, fs.ErrPermission) {
+					t.Fatalf("scanFS() error = %v, want errors.Is(err, fs.ErrPermission)", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("scanFS() error = %v, want <nil>", err)
+			}
+
+			var want []string
+			for _, e := range scanOK(t, root) {
+				if e.Path != tc.skip && !strings.HasPrefix(e.Path, tc.skip+"/") {
+					want = append(want, e.Path)
+				}
+			}
+			if got := paths(entries); !slices.Equal(got, want) {
+				t.Errorf("scanFS() entries = %v, want %v", got, want)
+			}
+			if len(skips) != 1 || skips[0].Path != tc.skip || !errors.Is(skips[0].Err, fs.ErrPermission) {
+				t.Errorf("scanFS() skips = %+v, want only %s with a permission error", skips, tc.skip)
+			}
+		})
+	}
+}
+
+// unreadableFS 让 dir 这个目录读不出来，让 entry 这个节点的信息读不出来
+type unreadableFS struct {
+	fs.ReadDirFS
+	dir   string
+	entry string
+}
+
+func (u unreadableFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == u.dir {
+		return nil, &fs.PathError{Op: "readdirent", Path: name, Err: fs.ErrPermission}
+	}
+	entries, err := u.ReadDirFS.ReadDir(name)
+	for i, e := range entries {
+		if path.Join(name, e.Name()) == u.entry {
+			entries[i] = unreadableEntry{e}
+		}
+	}
+	return entries, err
+}
+
+// unreadableEntry 的 Info 报权限错误，类型信息照旧
+type unreadableEntry struct{ fs.DirEntry }
+
+func (u unreadableEntry) Info() (fs.FileInfo, error) {
+	return nil, &fs.PathError{Op: "lstat", Path: u.Name(), Err: fs.ErrPermission}
+}
+
 // ---------- 辅助函数 ----------
 
-// scanOK 执行 Scan，出错时让测试立即失败。
+// scanOK 执行 Scan，出错或者有跳过的节点时让测试立即失败：用例里搭的树都该是能读的
 func scanOK(t *testing.T, root string) []Entry {
 	t.Helper()
-	entries, err := Scan(root)
+	entries, skips, err := Scan(root)
 	if err != nil {
 		t.Fatalf("Scan(%q) error = %v", root, err)
+	}
+	if len(skips) > 0 {
+		t.Fatalf("Scan(%q) skipped %v, want nothing skipped", root, skips)
 	}
 	return entries
 }
