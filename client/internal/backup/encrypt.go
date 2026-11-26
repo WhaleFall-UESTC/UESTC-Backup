@@ -27,7 +27,8 @@ func encryptFile(ctx context.Context, raw, dst, password string) error {
 	return sealArchive(ctx, raw, dst, password, h)
 }
 
-// sealArchive 按字段表写公共头和扩展头，再把 raw 加密成密文；失败时删掉半截文件
+// sealArchive 按字段表写公共头和扩展头，把 raw 加密成密文，最后回填认证标签和校验值；
+// 失败时删掉半截文件
 func sealArchive(ctx context.Context, raw, dst, password string, h encHeader) error {
 	keys, err := aescbc.DeriveKeys(password, h.salt[:], int(h.iterations))
 	if err != nil {
@@ -46,13 +47,19 @@ func sealArchive(ctx context.Context, raw, dst, password string, h encHeader) er
 		return err
 	}
 	w := &archiveWriter{f: out}
+	mac := keys.MAC()
+	// 写出去的字节同时进校验值和认证标签，那两栏这时候还都是 0
+	sink := io.MultiWriter(w, mac)
 
-	err = writeArchiveHeader(w, AlgorithmAES)
+	err = writeArchiveHeader(sink, AlgorithmAES)
 	if err == nil {
-		_, err = w.Write(h.bytes())
+		_, err = sink.Write(h.bytes())
 	}
 	if err == nil {
-		err = aescbc.Encrypt(ctxReader{ctx: ctx, r: in}, w, keys.Encrypt, h.iv[:])
+		err = aescbc.Encrypt(ctxReader{ctx: ctx, r: in}, sink, keys.Encrypt, h.iv[:])
+	}
+	if err == nil {
+		_, err = out.WriteAt(mac.Sum(nil), archiveHeaderSize+encMACOffset)
 	}
 	if err == nil {
 		// 回填公共头里的校验值

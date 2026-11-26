@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"hash/crc64"
 	"io"
 	"os"
@@ -63,6 +64,7 @@ func (h *header) readEnc(r io.Reader, path string) error {
 	copy(h.enc.iv[:], h.encRaw[encIVOffset:])
 	h.enc.iterations = binary.LittleEndian.Uint32(h.encRaw[encIterOffset:])
 	copy(h.enc.verifier[:], h.encRaw[encVerifierOffset:])
+	copy(h.enc.mac[:], h.encRaw[encMACOffset:])
 	return nil
 }
 
@@ -110,8 +112,8 @@ func openArchive(path, password string) (*os.File, func(), error) {
 	return inner, innerCleanup, nil
 }
 
-// decryptArchive 先核对口令，再把密文解到临时文件；存盘字节的 CRC64 对不上就删掉重来。
-// 口令不对时一个字节都不解
+// decryptArchive 核对口令、认证整份归档，再把密文解到临时文件。
+// 口令不对或者认证不过时一个字节都不解
 func decryptArchive(f *os.File, path, password string, h header) (*os.File, func(), error) {
 	defer func() { _ = f.Close() }()
 
@@ -122,16 +124,13 @@ func decryptArchive(f *os.File, path, password string, h header) (*os.File, func
 	if (info.Size()-h.dataOffset)%aesBlockSize != 0 {
 		return nil, nil, errs.Newf(errs.Corrupted, "ciphertext is %d bytes", info.Size()-h.dataOffset).At(path)
 	}
-	// 迭代次数是归档说了算，先卡住上限再去派生，不然一份归档就能让人算上几分钟
-	if h.enc.iterations == 0 || h.enc.iterations > aescbc.MaxIterations {
-		return nil, nil, errs.Newf(errs.Corrupted, "iterations %d", h.enc.iterations).At(path)
-	}
-	keys, err := aescbc.DeriveKeys(password, h.enc.salt[:], int(h.enc.iterations))
+	keys, err := unseal(f, path, password, h)
 	if err != nil {
-		return nil, nil, errs.Wrap(err, errs.Corrupted).At(path)
+		return nil, nil, err
 	}
-	if verifier := keys.Verifier(); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
-		return nil, nil, errs.New(errs.WrongPassword).At(path)
+	// CRC64 和认证标签刚才都核过了，这里只管解密
+	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
+		return nil, nil, err
 	}
 	transform := func(r io.Reader, w io.Writer) error {
 		err := aescbc.Decrypt(r, w, keys.Encrypt, h.enc.iv[:])
@@ -140,9 +139,70 @@ func decryptArchive(f *os.File, path, password string, h header) (*os.File, func
 		}
 		return err
 	}
-	return toTemp(h, h.encRaw, f, path, transform)
+	plain, cleanup, err := transformToTemp(f, transform)
+	if err != nil {
+		var e *errs.Error
+		if errors.As(err, &e) {
+			return nil, nil, e.At(path)
+		}
+		return nil, nil, err
+	}
+	return plain, cleanup, nil
 }
 
+// unseal 核对口令，再核对存盘字节的 CRC64 和认证标签，都过了才交出这份归档的密钥
+func unseal(f *os.File, path, password string, h header) (aescbc.Keys, error) {
+	// 迭代次数是归档说了算的，先卡住上限再去派生，不然一份归档就能让人算上几分钟
+	if h.enc.iterations == 0 || h.enc.iterations > aescbc.MaxIterations {
+		return aescbc.Keys{}, errs.Newf(errs.Corrupted, "iterations %d", h.enc.iterations).At(path)
+	}
+	keys, err := aescbc.DeriveKeys(password, h.enc.salt[:], int(h.enc.iterations))
+	if err != nil {
+		return aescbc.Keys{}, errs.Wrap(err, errs.Corrupted).At(path)
+	}
+	if verifier := keys.Verifier(); subtle.ConstantTimeCompare(verifier[:], h.enc.verifier[:]) != 1 {
+		return aescbc.Keys{}, errs.New(errs.WrongPassword).At(path)
+	}
+	if err := checkSeal(f, h, keys); err != nil {
+		return aescbc.Keys{}, err.At(path)
+	}
+	return keys, nil
+}
+
+// checkSeal 把存盘的字节从头到尾读一遍，核对公共头里的 CRC64 和扩展头里的认证标签
+func checkSeal(f *os.File, h header, keys aescbc.Keys) *errs.Error {
+	crc := crc64.New(crcTable)
+	mac := keys.MAC()
+	if err := readSeal(f, h, io.MultiWriter(crc, mac)); err != nil {
+		return errs.Wrap(err, errs.IO)
+	}
+	if crc.Sum64() != h.crc {
+		return errs.Newf(errs.Corrupted, "checksum mismatch")
+	}
+	if subtle.ConstantTimeCompare(mac.Sum(nil), h.enc.mac[:]) != 1 {
+		return errs.Newf(errs.Corrupted, "authentication failed")
+	}
+	return nil
+}
+
+// readSeal 把归档存盘的字节从头到尾读进 w。
+// CRC64 和认证标签是回填的，算的时候按 0 计入，这里也换成 0
+func readSeal(f *os.File, h header, w io.Writer) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	_, _ = w.Write(h.raw[:archiveHeaderSize-crcSize])
+	_, _ = w.Write(zeroCRC[:])
+	_, _ = w.Write(h.encRaw[:encMACOffset])
+	_, _ = w.Write(zeroMAC[:])
+	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
+		return err
+	}
+	_, err := io.Copy(w, f)
+	return err
+}
+
+// uncompressArchive 把压缩的归档解到临时文件，顺带核对存盘字节的 CRC64
 func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), error) {
 	defer func() { _ = f.Close() }()
 
@@ -156,46 +216,61 @@ func uncompressArchive(f *os.File, path string, h header) (*os.File, func(), err
 	if _, err := f.Seek(h.dataOffset, io.SeekStart); err != nil {
 		return nil, nil, err
 	}
-	transform := func(r io.Reader, w io.Writer) error {
-		return decompress(h.algorithm, r, w)
-	}
-	return toTemp(h, nil, f, path, transform)
-}
-
-// toTemp 把 r 经 transform 写进临时文件，同时核对存盘字节的 CRC64；
-// extra 是记录区之前、不属于公共头的字节（加密扩展头），校验时一并算进去
-func toTemp(h header, extra []byte, r io.Reader, path string, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
-	tmp, err := os.CreateTemp("", "dbkp-*")
-	if err != nil {
-		return nil, nil, err
-	}
 	crc := crc64.New(crcTable)
 	_, _ = crc.Write(h.raw[:archiveHeaderSize-crcSize])
 	_, _ = crc.Write(zeroCRC[:])
-	_, _ = crc.Write(extra)
-	src := io.TeeReader(r, crc)
-	err = transform(src, tmp)
-	if err == nil {
-		// 变换没读完的尾部也要算进校验值
-		_, err = io.Copy(io.Discard, src)
+	transform := func(r io.Reader, w io.Writer) error {
+		return decompress(h.algorithm, r, w)
 	}
+	return toTemp(h, crc, f, path, transform)
+}
+
+// toTemp 把 r 经 transform 写进临时文件，同时核对存盘字节的 CRC64。
+// crc 是读到 r 之前已经算了一段的校验值，r 读到的字节都算进去，变换没读完的尾部也要算
+func toTemp(h header, crc hash.Hash64, r io.Reader, path string, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
+	plain, cleanup, err := transformToTemp(io.TeeReader(r, crc), drainAfter(transform))
 	if err == nil && crc.Sum64() != h.crc {
-		err = errs.Newf(errs.Corrupted, "checksum mismatch").At(path)
-	}
-	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
+		cleanup()
+		err = errs.Newf(errs.Corrupted, "checksum mismatch")
 	}
 	if err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
 		var e *errs.Error
 		if errors.As(err, &e) {
 			return nil, nil, e.At(path)
 		}
 		return nil, nil, err
 	}
-	return tmp, func() {
+	return plain, cleanup, nil
+}
+
+// drainAfter 让 transform 跑完之后把 r 剩下的字节读干净
+func drainAfter(transform func(io.Reader, io.Writer) error) func(io.Reader, io.Writer) error {
+	return func(r io.Reader, w io.Writer) error {
+		if err := transform(r, w); err != nil {
+			return err
+		}
+		_, err := io.Copy(io.Discard, r)
+		return err
+	}
+}
+
+// transformToTemp 把 r 经 transform 写进临时文件，返回位置在开头的文件；出错时不留文件
+func transformToTemp(r io.Reader, transform func(io.Reader, io.Writer) error) (*os.File, func(), error) {
+	tmp, err := os.CreateTemp("", "dbkp-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
-	}, nil
+	}
+	err = transform(r, tmp)
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return tmp, cleanup, nil
 }

@@ -6,6 +6,8 @@ import (
 	"client/internal/errs"
 	"client/internal/lz77"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -51,6 +53,9 @@ func TestPackEncryptedArchiveLayout(t *testing.T) {
 	keys := mustDerive(t, password, got)
 	if verifier := keys.Verifier(); !bytes.Equal(got[60:92], verifier[:]) {
 		t.Errorf("Pack() stored verifier % x, want % x", got[60:92], verifier)
+	}
+	if mac := storedMAC(keys, got); !bytes.Equal(got[92:124], mac) {
+		t.Errorf("Pack() stored MAC % x, want % x", got[92:124], mac)
 	}
 	if err := checkStoredCRC(got); err != nil {
 		t.Errorf("Pack() %v", err)
@@ -136,7 +141,7 @@ func TestEncryptedHeaderIsFrozen(t *testing.T) {
 		'D', 'B', 'K', 'P', // Magic
 		0x01, 0x00, // Version = 1
 		0x03, 0x00, // Algorithm = 3
-		0x5C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 92
+		0x7C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DataOffset = 124
 	}
 	if !bytes.Equal(got[:16], want) {
 		t.Errorf("public header = % x, want % x", got[:16], want)
@@ -148,6 +153,9 @@ func TestEncryptedHeaderIsFrozen(t *testing.T) {
 	}
 	if verifier := hex.EncodeToString(got[60:92]); verifier != frozenVerifier {
 		t.Errorf("stored verifier = %s, want %s", verifier, frozenVerifier)
+	}
+	if mac := storedMAC(mustDerive(t, "pw", got), got); !bytes.Equal(got[92:124], mac) {
+		t.Errorf("stored MAC = % x, want % x", got[92:124], mac)
 	}
 	if err := checkStoredCRC(got); err != nil {
 		t.Errorf("sealArchive() %v", err)
@@ -222,7 +230,8 @@ func TestEncryptedArchiveRejectsWrongPassword(t *testing.T) {
 }
 
 // 加密归档里坏一个字节或者少一段，Verify 和 Unpack 都要报错，Unpack 不写任何文件。
-// 改盐、改迭代次数、改校验值算口令不对；改公共头、改密文算归档坏了
+// 改盐、改校验值算口令不对；改公共头、改密文算归档坏了。
+// 校验值谁都能重算，所以改完再把 CRC64 算成对的也要拦下，这是认证标签的活
 func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), strings.Repeat("内容 abc\n", 200))
@@ -239,21 +248,42 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 			return raw
 		}
 	}
+	// withCRC 表示改完之后按格式约定把公共头里的 CRC64 重算成对的
+	withCRC := func(damage func([]byte) []byte) func([]byte) []byte {
+		return func(raw []byte) []byte {
+			raw = damage(raw)
+			crc := crc64.New(crc64.MakeTable(crc64.ECMA))
+			_, _ = crc.Write(raw[:16])
+			_, _ = crc.Write(make([]byte, 8))
+			_, _ = crc.Write(raw[24:92])
+			_, _ = crc.Write(make([]byte, 32))
+			_, _ = crc.Write(raw[124:])
+			binary.LittleEndian.PutUint64(raw[16:24], crc.Sum64())
+			return raw
+		}
+	}
+	cipherStart := int(archiveEncDataOffset)
+
 	tests := []struct {
 		name   string
 		damage func([]byte) []byte
 		want   error
+		detail string // 错误里应该出现的说明，空串表示不查
 	}{
-		{"公共头里的校验值", flip(16), errs.ErrCorrupted},
-		{"公共头里的数据偏移", flip(8), errs.ErrCorrupted},
-		{"扩展头里的盐", flip(24), errs.ErrWrongPassword},
-		{"扩展头里的校验值", flip(60), errs.ErrWrongPassword},
-		{"扩展头里的 IV", flip(40), errs.ErrCorrupted},
-		{"密文中间", flip(int(archiveEncDataOffset) + 16), errs.ErrCorrupted},
-		{"密文最后一块", flip(len(raw) - 1), errs.ErrCorrupted},
-		{"密文截断一个字节", func(raw []byte) []byte { return raw[:len(raw)-1] }, errs.ErrCorrupted},
-		{"密文只剩扩展头", func(raw []byte) []byte { return raw[:archiveEncDataOffset] }, errs.ErrCorrupted},
-		{"扩展头没读完", func(raw []byte) []byte { return raw[:50] }, errs.ErrCorrupted},
+		{"公共头里的校验值", flip(16), errs.ErrCorrupted, ""},
+		{"公共头里的数据偏移", flip(8), errs.ErrCorrupted, ""},
+		{"扩展头里的盐", flip(24), errs.ErrWrongPassword, ""},
+		{"扩展头里的校验值", flip(60), errs.ErrWrongPassword, ""},
+		{"扩展头里的 IV", flip(40), errs.ErrCorrupted, ""},
+		{"密文中间", flip(cipherStart + 16), errs.ErrCorrupted, ""},
+		{"密文最后一块", flip(len(raw) - 1), errs.ErrCorrupted, ""},
+		{"密文截断一个字节", func(raw []byte) []byte { return raw[:len(raw)-1] }, errs.ErrCorrupted, ""},
+		{"密文只剩扩展头", func(raw []byte) []byte { return raw[:cipherStart] }, errs.ErrCorrupted, ""},
+		{"扩展头没读完", func(raw []byte) []byte { return raw[:50] }, errs.ErrCorrupted, ""},
+
+		{"IV，校验值重算过", withCRC(flip(40)), errs.ErrCorrupted, "authentication failed"},
+		{"密文中间，校验值重算过", withCRC(flip(cipherStart + 16)), errs.ErrCorrupted, "authentication failed"},
+		{"认证标签，校验值重算过", withCRC(flip(92)), errs.ErrCorrupted, "authentication failed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -262,12 +292,23 @@ func TestEncryptedArchiveDamageIsDetected(t *testing.T) {
 				t.Fatalf("Setup failed: write the damaged archive: %v", err)
 			}
 
-			if err := Verify(context.Background(), broken, password, VerifyOptions{}); !errors.Is(err, tc.want) {
-				t.Errorf("Verify(%q) error = %v, want errors.Is(err, %v)", broken, err, tc.want)
+			check := func(err error) error {
+				var e *errs.Error
+				switch {
+				case !errors.Is(err, tc.want):
+					return fmt.Errorf("error = %v, want errors.Is(err, %v)", err, tc.want)
+				case tc.detail != "" && (!errors.As(err, &e) || !strings.Contains(e.Detail, tc.detail)):
+					return fmt.Errorf("error = %v, want its detail to mention %q", err, tc.detail)
+				}
+				return nil
+			}
+			if problem := check(Verify(context.Background(), broken, password, VerifyOptions{})); problem != nil {
+				t.Errorf("Verify(%q) %v", broken, problem)
 			}
 			dst := t.TempDir()
-			if _, err := Unpack(context.Background(), broken, dst, password, UnpackOptions{}); !errors.Is(err, tc.want) {
-				t.Errorf("Unpack(%q, %q) error = %v, want errors.Is(err, %v)", broken, dst, err, tc.want)
+			_, err := Unpack(context.Background(), broken, dst, password, UnpackOptions{})
+			if problem := check(err); problem != nil {
+				t.Errorf("Unpack(%q, %q) %v", broken, dst, problem)
 			}
 			if got := entryNames(t, dst); len(got) != 0 {
 				t.Errorf("Unpack(%q, %q) left %v in the target, want nothing written from a damaged archive",
@@ -413,16 +454,30 @@ func decryptBytes(t *testing.T, raw []byte, password string) []byte {
 	return plain.Bytes()
 }
 
-// checkStoredCRC 核对公共头里的 CRC64，按“校验值字段按 0 计入”的约定
+// checkStoredCRC 核对公共头里的 CRC64：按约定，回填的校验值和认证标签两栏都按 0 计入
 func checkStoredCRC(raw []byte) error {
 	crc := crc64.New(crc64.MakeTable(crc64.ECMA))
-	crc.Write(raw[:16])
-	crc.Write(make([]byte, 8))
-	crc.Write(raw[24:])
+	_, _ = crc.Write(raw[:16])
+	_, _ = crc.Write(make([]byte, 8))
+	_, _ = crc.Write(raw[24:92])
+	_, _ = crc.Write(make([]byte, 32))
+	_, _ = crc.Write(raw[124:])
 	if stored := binary.LittleEndian.Uint64(raw[16:24]); crc.Sum64() != stored {
 		return fmt.Errorf("stored CRC64 = %#x, want %#x", stored, crc.Sum64())
 	}
 	return nil
+}
+
+// storedMAC 按字段表重算一份加密归档的认证标签：
+// 公共头里的 CRC64、扩展头里的认证标签自己按 0 计入
+func storedMAC(keys aescbc.Keys, raw []byte) []byte {
+	mac := hmac.New(sha256.New, keys.Auth[:])
+	_, _ = mac.Write(raw[:16])
+	_, _ = mac.Write(make([]byte, 8))
+	_, _ = mac.Write(raw[24:92])
+	_, _ = mac.Write(make([]byte, 32))
+	_, _ = mac.Write(raw[124:])
+	return mac.Sum(nil)
 }
 
 // frozenSalt 是扩展头测试用的盐，取值 0x00..0x0f
