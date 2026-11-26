@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,8 +30,16 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o755); err != nil {
 		return nil, err
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
-		json.Unmarshal(raw, &s.metas)
+	raw, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return s, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// 坏元数据接着用，下次保存会拿空列表把原记录毁掉
+	if err := json.Unmarshal(raw, &s.metas); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
