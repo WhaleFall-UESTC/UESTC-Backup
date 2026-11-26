@@ -1,6 +1,6 @@
 ---
 name: go-deslop
-description: "为 Go 而生的 AI 代码去味（deslop）：提交前清理 AI 生成的冗余代码——过度设计、不可能场景的错误处理、明显注释、未请求的顺手优化；核心标准是最小实现（能否删掉而不影响任务）。以《腾讯 GO 语言编程指南》为判据，删除后验证仅移除 slop 且编译/测试通过。Use before committing, when user says deslop/清理/删冗余/瘦身代码, or reviewing AI-written Go code for over-engineering."
+description: "提交前清理 AI 生成的冗余代码——过度设计、不可能场景的错误处理、明显注释、未请求的顺手优化；核心标准是最小实现（能否删掉而不影响任务，当前是否是最小代码实现）。以《腾讯 GO 语言编程指南》为判据，删除后验证仅移除 slop 且编译/测试通过。Use before committing, when user says deslop/清理/删冗余/瘦身代码, or reviewing AI-written Go code for over-engineering."
 ---
 
 <!-- argument-hint: [范围：未提交变更(默认) / 文件 / commit 范围] -->
