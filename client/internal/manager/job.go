@@ -232,20 +232,36 @@ func start(kind, taskName string, exec func(ctx context.Context, emit func(backu
 	return j.id, nil
 }
 
+// progressThrottle 决定一条进度要不要发布：阶段变化必发，同一阶段至少隔 progressInterval。
+// 只被作业的 goroutine 触碰；now 可以替换，测试里用假时钟
+type progressThrottle struct {
+	lastPhase backup.Phase
+	lastEmit  time.Time
+	now       func() time.Time
+}
+
+// allow 判断这条进度发不发，发了就记下这次的时间
+func (pt *progressThrottle) allow(p backup.Progress) bool {
+	now := pt.now()
+	if p.Phase != pt.lastPhase || now.Sub(pt.lastEmit) >= progressInterval {
+		pt.lastPhase, pt.lastEmit = p.Phase, now
+		return true
+	}
+	return false
+}
+
 // runJob 在自己的 goroutine 里跑作业：进度经节流发给订阅者，结束时定状态、留结果、发最后一帧
 func runJob(ctx context.Context, j *job, exec func(ctx context.Context, emit func(backup.Progress)) (*Result, error)) {
 	defer j.cancel()
 	started := time.Now()
 
-	var lastPhase backup.Phase
-	var lastEmit time.Time
+	throttle := progressThrottle{now: time.Now}
 	emit := func(p backup.Progress) {
 		jobsMu.Lock()
 		j.prog = p // 查询永远拿到最新进度，节流只管发布
+		send := throttle.allow(p)
 		var snap Snapshot
-		send := p.Phase != lastPhase || time.Since(lastEmit) >= progressInterval
 		if send {
-			lastPhase, lastEmit = p.Phase, time.Now()
 			snap = j.snapshotValue()
 		}
 		jobsMu.Unlock()

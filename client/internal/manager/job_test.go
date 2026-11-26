@@ -289,8 +289,35 @@ func TestSecondJobRejectedWhileRunning(t *testing.T) {
 	}
 }
 
-// 同一阶段内 DoneFiles 不回退，相邻两条进度至少隔 100 毫秒，结束帧的计数走到头
-func TestProgressThrottledAndMonotonic(t *testing.T) {
+// 同一阶段内最多每 100 毫秒发一条，阶段变化必发，用假时钟跑，不依赖机器快慢
+func TestProgressThrottle(t *testing.T) {
+	now := time.Unix(0, 0)
+	pt := progressThrottle{now: func() time.Time { return now }}
+
+	if !pt.allow(backup.Progress{Phase: backup.PhasePacking, DoneFiles: 1}) {
+		t.Error("the first progress in a phase was dropped")
+	}
+	for i := 2; i <= 10; i++ {
+		now = now.Add(10 * time.Millisecond)
+		if pt.allow(backup.Progress{Phase: backup.PhasePacking, DoneFiles: i}) {
+			t.Errorf("progress %d published %dms after the last one", i, 10*(i-1))
+		}
+	}
+	now = now.Add(10 * time.Millisecond)
+	if !pt.allow(backup.Progress{Phase: backup.PhasePacking, DoneFiles: 11}) {
+		t.Error("progress 100ms after the last one was dropped")
+	}
+	if pt.allow(backup.Progress{Phase: backup.PhasePacking, DoneFiles: 12}) {
+		t.Error("progress published right after the last one")
+	}
+	now = now.Add(time.Millisecond)
+	if !pt.allow(backup.Progress{Phase: backup.PhaseCompressing}) {
+		t.Error("a phase change was dropped")
+	}
+}
+
+// 真实备份里 DoneFiles 不回退；若同一阶段收到相邻两条，间隔不小于节流间隔；结束帧计数走到头
+func TestProgressMonotonic(t *testing.T) {
 	id, _ := startBackup(t, flatSource(t, 3000), "")
 
 	ch, unsub := collectEvents(128)
@@ -307,20 +334,12 @@ func TestProgressThrottledAndMonotonic(t *testing.T) {
 		if e.snap.DoneFiles < prev.snap.DoneFiles {
 			t.Errorf("DoneFiles went back: %d after %d in phase %s", e.snap.DoneFiles, prev.snap.DoneFiles, e.snap.Phase)
 		}
-		if gap := e.at.Sub(prev.at); gap < progressInterval {
+		// 回调记账比节流判定晚一点，留 1 毫秒余量
+		if gap := e.at.Sub(prev.at); gap < progressInterval-time.Millisecond {
 			t.Errorf("two progress events %v apart in phase %s, want at least %v", gap, e.snap.Phase, progressInterval)
 		}
 	}
 
-	packing := 0
-	for _, e := range evs {
-		if e.snap.State == StateRunning && e.snap.Phase == "打包" {
-			packing++
-		}
-	}
-	if packing < 2 {
-		t.Fatalf("got %d packing events, want at least 2", packing)
-	}
 	if s.DoneFiles != 3000 || s.TotalFiles != 3000 || s.Result.Files != 3000 {
 		t.Errorf("final = %d/%d files, Result = %+v, want 3000", s.DoneFiles, s.TotalFiles, s.Result)
 	}
