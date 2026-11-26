@@ -20,6 +20,7 @@ const (
 	TargetNotEmpty
 	WrongPassword
 	PartialBackup
+	JobBusy
 )
 
 var phrases = map[Code]string{
@@ -32,6 +33,7 @@ var phrases = map[Code]string{
 	TargetNotEmpty:     "target directory is not empty",
 	WrongPassword:      "wrong password",
 	PartialBackup:      "backup skipped files",
+	JobBusy:            "another job is running",
 }
 
 // String 返回类别的固定说法。
@@ -48,6 +50,7 @@ var (
 	ErrTargetNotEmpty     = &Error{Code: TargetNotEmpty}
 	ErrWrongPassword      = &Error{Code: WrongPassword}
 	ErrPartialBackup      = &Error{Code: PartialBackup}
+	ErrJobBusy            = &Error{Code: JobBusy}
 )
 
 // Error 是引擎自己判定出来的错误。
