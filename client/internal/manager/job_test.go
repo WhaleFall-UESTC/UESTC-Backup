@@ -28,14 +28,14 @@ func flatSource(t *testing.T, n int) string {
 	return dir
 }
 
-// addBackupTask 把一条指向 src 的任务写进任务文件并返回它，要先跑过 useTempConfig
-func addBackupTask(t *testing.T, name, src, algo, password string) tasks.Task {
+// addBackupTask 把一条不压缩的任务写进任务文件并返回它，要先跑过 useTempConfig
+func addBackupTask(t *testing.T, name, src, password string) tasks.Task {
 	t.Helper()
 	task := tasks.Task{
 		Name:        name,
 		Source:      src,
 		Destination: filepath.Join(t.TempDir(), name+".dbkp"),
-		Algorithm:   algo,
+		Algorithm:   "none",
 		Encrypted:   password != "",
 	}
 	if err := AddTask(task); err != nil {
@@ -48,7 +48,7 @@ func addBackupTask(t *testing.T, name, src, algo, password string) tasks.Task {
 func startBackup(t *testing.T, src, password string) (string, tasks.Task) {
 	t.Helper()
 	useTempConfig(t)
-	task := addBackupTask(t, "t", src, "none", password)
+	task := addBackupTask(t, "t", src, password)
 	id, err := StartBackup(task.Name, password)
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
@@ -257,13 +257,13 @@ func TestRestoreJobRestoresWholeArchive(t *testing.T) {
 // 作业进行中再起备份、校验、还原都被拒，类别是 JobBusy；作业结束后能再起
 func TestSecondJobRejectedWhileRunning(t *testing.T) {
 	useTempConfig(t)
-	task := addBackupTask(t, "a", flatSource(t, 3000), "none", "")
+	task := addBackupTask(t, "a", flatSource(t, 3000), "")
 	id, err := StartBackup(task.Name, "")
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
 	}
 
-	addBackupTask(t, "b", flatSource(t, 1), "none", "")
+	addBackupTask(t, "b", flatSource(t, 1), "")
 	if _, err := StartBackup("b", ""); !errors.Is(err, errs.ErrJobBusy) {
 		t.Errorf("second StartBackup: error = %v, want errs.ErrJobBusy", err)
 	}
@@ -352,7 +352,7 @@ func TestSnapshotsListsAllJobs(t *testing.T) {
 	jobs = map[string]*job{}
 	jobsMu.Unlock()
 
-	task := addBackupTask(t, "a", flatSource(t, 3000), "none", "")
+	task := addBackupTask(t, "a", flatSource(t, 3000), "")
 	first, err := StartBackup(task.Name, "")
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
@@ -366,7 +366,7 @@ func TestSnapshotsListsAllJobs(t *testing.T) {
 	}
 	waitState(t, first)
 
-	secondTask := addBackupTask(t, "b", flatSource(t, 1), "none", "")
+	secondTask := addBackupTask(t, "b", flatSource(t, 1), "")
 	second, err := StartBackup(secondTask.Name, "")
 	if err != nil {
 		t.Fatalf("StartBackup() error = %v", err)
