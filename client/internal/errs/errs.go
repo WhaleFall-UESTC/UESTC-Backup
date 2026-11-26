@@ -19,6 +19,7 @@ const (
 	InvalidArgument
 	TargetNotEmpty
 	WrongPassword
+	PartialBackup
 )
 
 var phrases = map[Code]string{
@@ -30,6 +31,7 @@ var phrases = map[Code]string{
 	InvalidArgument:    "invalid argument",
 	TargetNotEmpty:     "target directory is not empty",
 	WrongPassword:      "wrong password",
+	PartialBackup:      "backup skipped files",
 }
 
 // String 返回类别的固定说法。
@@ -45,6 +47,7 @@ var (
 	ErrInvalidArgument    = &Error{Code: InvalidArgument}
 	ErrTargetNotEmpty     = &Error{Code: TargetNotEmpty}
 	ErrWrongPassword      = &Error{Code: WrongPassword}
+	ErrPartialBackup      = &Error{Code: PartialBackup}
 )
 
 // Error 是引擎自己判定出来的错误。

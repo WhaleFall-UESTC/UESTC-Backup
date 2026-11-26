@@ -165,5 +165,8 @@ func runTaskRun(ctx context.Context, args []string) error {
 	reportSkips(skips)
 	fmt.Printf("任务 %s 已打包 %d 个节点到 %s，跳过 %d 个\n",
 		t.Name, len(entries)-len(skips), t.Destination, len(scanSkips)+len(skips))
+	if n := len(scanSkips) + len(skips); n > 0 {
+		return errs.Newf(errs.PartialBackup, "%d files skipped", n)
+	}
 	return nil
 }

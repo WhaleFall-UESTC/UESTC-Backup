@@ -244,7 +244,7 @@ func TestUnpackRejectsEscapingPath(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			archive := packTree(t, t.TempDir(), []Entry{{Path: tc.path, Kind: KindDir}})
+			archive := forgedArchive(t, tc.path, byte(KindDir))
 			dst := t.TempDir()
 			outside := filepath.Dir(dst)
 			before := entryNames(t, outside)
@@ -263,9 +263,9 @@ func TestUnpackRejectsEscapingPath(t *testing.T) {
 	}
 }
 
-// 记录头的 Kind 只有文件、目录、符号链接三种，其余的是坏归档。
+// 记录头的 Kind 只有文件、目录、符号链接三种，其余的是坏归档
 func TestUnpackRejectsUnknownKind(t *testing.T) {
-	archive := packTree(t, t.TempDir(), []Entry{{Path: "odd", Kind: Kind(9)}})
+	archive := forgedArchive(t, "odd", byte(9))
 
 	_, err := Unpack(context.Background(), archive, t.TempDir(), "", UnpackOptions{})
 	if problem := errOn(err, archive, errs.ErrCorrupted); problem != nil {

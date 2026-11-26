@@ -138,3 +138,22 @@ func TestValidate(t *testing.T) {
 		t.Errorf("Validate() on a good task = %v, want <nil>", err)
 	}
 }
+
+// 任务落盘用绝对路径，换一个目录执行还指向同一处
+func TestAddMakesPathsAbsolute(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("src", 0o700); err != nil {
+		t.Fatalf("Setup failed: mkdir: %v", err)
+	}
+
+	list, err := Add(nil, Task{Name: "a", Source: "src", Destination: "a.dbkp"})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	wantSrc, _ := filepath.Abs("src")
+	wantDst, _ := filepath.Abs("a.dbkp")
+	if list[0].Source != wantSrc || list[0].Destination != wantDst {
+		t.Errorf("Add() stored Source %q Destination %q, want %q and %q",
+			list[0].Source, list[0].Destination, wantSrc, wantDst)
+	}
+}

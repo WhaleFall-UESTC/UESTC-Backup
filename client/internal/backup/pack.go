@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"client/internal/errs"
 )
@@ -19,9 +20,15 @@ type PackOptions struct {
 	Progress  func(Progress)
 }
 
+// packFiles 是打包时三个阶段的产物各写到哪：不压缩的归档、压缩后的归档、密文。
+// 成品是其中一个改名成 dst，其余的都删掉
+type packFiles struct {
+	raw, compressed, encrypted string
+}
+
 // Pack 把 entries 写成 .dbkp，读不了的文件跳过并记进返回值，出错时不留半截归档。
 // Algorithm 不为 0 时把整个归档压一遍，压完不比原样小就改存原样；
-// Password 不为空时再加密整份归档
+// Password 不为空时再加密整份归档，目标目录里只落密文
 func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOptions) ([]Skip, error) {
 	if err := CheckDestination(dst, src); err != nil {
 		return nil, err
@@ -30,12 +37,22 @@ func Pack(ctx context.Context, dst, src string, entries []Entry, opts PackOption
 		return nil, errs.Newf(errs.InvalidArgument, "unknown algorithm %d", opts.Algorithm)
 	}
 
-	tmp := dst + ".tmp"
-	skips, size, err := packRaw(ctx, tmp, src, entries, opts)
+	files := packFiles{raw: dst + ".tmp", compressed: dst + ".cmp.tmp", encrypted: dst + ".enc.tmp"}
+	// 原样归档和压缩后的归档都是明文。带口令时把它们放到本机的暂存目录，不经过目标目录
+	if opts.Password != "" {
+		stage, err := newStaging()
+		if err != nil {
+			return nil, err
+		}
+		defer stage.remove()
+		files.raw, files.compressed, files.encrypted = stage.path("raw"), stage.path("compressed"), dst+".tmp"
+	}
+
+	skips, size, err := packRaw(ctx, files.raw, src, entries, opts)
 	if err != nil {
 		return nil, err
 	}
-	if err := finalize(ctx, tmp, size, dst, opts); err != nil {
+	if err := finalize(ctx, files, size, dst, opts); err != nil {
 		return nil, err
 	}
 	return skips, nil
@@ -60,46 +77,60 @@ func packRaw(ctx context.Context, dst, src string, entries []Entry, opts PackOpt
 	return skips, w.offset, nil
 }
 
-// finalize 依次接上压缩和加密，把成品落到 dst；中间文件不论成败都清掉
-func finalize(ctx context.Context, raw string, rawSize int64, dst string, opts PackOptions) error {
-	temps := []string{raw}
+// finalize 依次接上压缩和加密，把成品改名成 dst；中间文件不论成败都清掉
+func finalize(ctx context.Context, files packFiles, rawSize int64, dst string, opts PackOptions) error {
+	temps := []string{files.raw, files.compressed, files.encrypted}
 	cleanup := func() {
 		for _, p := range temps {
 			_ = os.Remove(p)
 		}
 	}
 
-	keep := raw
+	keep := files.raw
 	if opts.Algorithm != AlgorithmNone {
 		emitPhase(opts.Progress, PhaseCompressing)
-		compressed := dst + ".cmp.tmp"
-		temps = append(temps, compressed)
-		size, err := compressFile(ctx, raw, compressed, opts.Algorithm)
+		size, err := compressFile(ctx, files.raw, files.compressed, opts.Algorithm)
 		if err != nil {
 			cleanup()
 			return err
 		}
 		if size < rawSize {
-			keep = compressed
+			keep = files.compressed
 		}
 	}
 	if opts.Password != "" {
 		emitPhase(opts.Progress, PhaseEncrypting)
-		encrypted := dst + ".enc.tmp"
-		temps = append(temps, encrypted)
-		if err := encryptFile(ctx, keep, encrypted, opts.Password); err != nil {
+		if err := encryptFile(ctx, keep, files.encrypted, opts.Password); err != nil {
 			cleanup()
 			return err
 		}
-		keep = encrypted
+		keep = files.encrypted
 	}
 
+	// 断电时没有 Sync 的话改名可能成功而数据还在页缓存里，盘上留下零填充的归档
+	if err := syncFile(keep); err != nil {
+		cleanup()
+		return err
+	}
 	if err := os.Rename(keep, dst); err != nil {
 		cleanup()
 		return err
 	}
 	cleanup() // keep 已经改名到 dst，剩下的是输掉的那几份
 	return nil
+}
+
+// syncFile 把文件内容刷到盘上。句柄要有写权限才能 Sync，所以用 O_WRONLY 开
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // CheckDestination 拒绝把归档放进源目录，否则它会把自己也打进去。
@@ -169,7 +200,16 @@ func writeArchiveHeader(w io.Writer, algo Algorithm) error {
 }
 
 // writeArchiveRecord 写一条记录；文件读不了时返回 Skip，不算致命错误。
+// Entry 是调用方给的，Kind 和路径先要合法：路径只用 '/' 分隔，越界的写进归档还原时会跑到源目录外
 func writeArchiveRecord(w *archiveWriter, src string, e Entry) (*Skip, error) {
+	switch e.Kind {
+	case KindFile, KindDir, KindSymlink:
+	default:
+		return nil, errs.Newf(errs.InvalidArgument, "kind %d", e.Kind).At(e.Path)
+	}
+	if !filepath.IsLocal(e.Path) || strings.ContainsRune(e.Path, '\\') || len(e.Path) > maxPathBytes {
+		return nil, errs.Newf(errs.InvalidArgument, "path %q", e.Path).At(e.Path)
+	}
 	if e.Size < 0 {
 		return nil, errs.Newf(errs.InvalidArgument, "size %d", e.Size).At(e.Path)
 	}

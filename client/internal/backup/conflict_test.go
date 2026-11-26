@@ -117,13 +117,12 @@ func TestUnpackTypeConflict(t *testing.T) {
 func TestUnpackUndoKeepsExistingFiles(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "good.txt"), "good")
-	entries := []Entry{
-		{Path: "good.txt", Kind: KindFile, Size: 4},
-		{Path: "../evil", Kind: KindDir},
-	}
+	// Pack 拒绝 ../evil 这样的 Entry，这条记录直接拼字节
+	raw := append(packBytes(t, src, []Entry{{Path: "good.txt", Kind: KindFile, Size: 4}}),
+		forgedRecord("../evil", byte(KindDir))...)
 	archive := filepath.Join(t.TempDir(), "x.dbkp")
-	if _, err := Pack(context.Background(), archive, src, entries, PackOptions{}); err != nil {
-		t.Fatalf("Setup failed: Pack() error = %v", err)
+	if err := os.WriteFile(archive, raw, 0o644); err != nil {
+		t.Fatalf("Setup failed: write the archive: %v", err)
 	}
 
 	dst := t.TempDir()
