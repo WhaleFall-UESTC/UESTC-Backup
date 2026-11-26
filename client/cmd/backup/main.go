@@ -114,6 +114,10 @@ func runPack(ctx context.Context, args []string) error {
 	if c.password != "" {
 		fmt.Println("归档已加密")
 	}
+	// 跳过是备份不完整，退出码要说出来，定时任务才能察觉
+	if n := len(scanSkips) + len(skips); n > 0 {
+		return errs.Newf(errs.PartialBackup, "%d files skipped", n)
+	}
 	return nil
 }
 
